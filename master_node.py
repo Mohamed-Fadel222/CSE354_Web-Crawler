@@ -11,11 +11,13 @@ load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger('Process')
+logger = logging.getLogger('Master')
 
 # AWS Configuration
 AWS_REGION = os.getenv('AWS_REGION', 'eu-north-1')
 SQS_QUEUE_URL = os.getenv('SQS_QUEUE_URL')
+logger.info(f"Using SQS Queue URL: {SQS_QUEUE_URL}")
+logger.info(f"Using AWS Region: {AWS_REGION}")
 sqs_client = boto3.client('sqs', region_name=AWS_REGION)
 
 class MasterNode:
@@ -29,36 +31,70 @@ class MasterNode:
         self.active_indexer_nodes = list(range(1 + self.crawler_nodes, size))
         self.urls_to_crawl = set()  # Using set to avoid duplicates
         self.crawled_urls = set()
-        self.crawler_status = {node: {'last_heartbeat': datetime.now(), 'active': True} 
+        self.crawler_status = {node: {'last_heartbeat': datetime.now(), 'active': True, 'urls_processed': 0} 
                              for node in self.active_crawler_nodes}
-        self.heartbeat_timeout = timedelta(seconds=30)
+        self.heartbeat_timeout = timedelta(seconds=60)  # Increased timeout
+        self.last_status_print = datetime.now()
+        self.status_print_interval = timedelta(seconds=10)
+        self.start_time = datetime.now()  # Track system start time
+        self.url_batch_size = 3  # Number of URLs to assign per crawler
 
     def initialize_seed_urls(self):
+        # Start with simple, reliable websites
         seed_urls = [
-            "https://example.com",
-            "https://example.org",
-            "https://example.net"
+            "http://example.com",
+            "http://httpbin.org",
+            "http://httpstat.us",
+            "http://example.org",
+            "http://example.net"
         ]
         self.urls_to_crawl.update(seed_urls)
         logger.info(f"Initialized with seed URLs: {seed_urls}")
 
     def check_crawler_health(self):
         current_time = datetime.now()
+        
+        # Print status periodically
+        if current_time - self.last_status_print > self.status_print_interval:
+            self.print_status()
+            self.last_status_print = current_time
+        
         for node, status in self.crawler_status.items():
             if current_time - status['last_heartbeat'] > self.heartbeat_timeout:
                 if status['active']:
                     logger.warning(f"Crawler node {node} has not sent heartbeat in {self.heartbeat_timeout}")
                     status['active'] = False
 
+    def print_status(self):
+        logger.info("\n=== System Status ===")
+        logger.info(f"URLs Queue Size: {len(self.urls_to_crawl)}")
+        logger.info(f"Total URLs Crawled: {len(self.crawled_urls)}")
+        logger.info("\nCrawler Status:")
+        for node, status in self.crawler_status.items():
+            state = "🟢 ACTIVE" if status['active'] else "🔴 INACTIVE"
+            urls = status['urls_processed']
+            last_beat = datetime.now() - status['last_heartbeat']
+            logger.info(f"Crawler {node}: {state}")
+            logger.info(f"  ├─ URLs Processed: {urls}")
+            logger.info(f"  └─ Last Heartbeat: {last_beat.seconds}s ago")
+        logger.info("\nSystem Health:")
+        active_crawlers = sum(1 for s in self.crawler_status.values() if s['active'])
+        logger.info(f"Active Crawlers: {active_crawlers}/{len(self.crawler_status)}")
+        logger.info(f"Processing Rate: {sum(s['urls_processed'] for s in self.crawler_status.values())/max(1, (datetime.now() - self.start_time).total_seconds()/60):.2f} URLs/minute")
+        logger.info("==================\n")
+
     def process_crawler_message(self, source, tag, data):
+        # Update heartbeat timestamp for any message from crawler
+        self.crawler_status[source]['last_heartbeat'] = datetime.now()
+        self.crawler_status[source]['active'] = True
+
         if tag == 1:  # Extracted URLs
             new_urls = set(data) - self.crawled_urls
             self.urls_to_crawl.update(new_urls)
+            self.crawler_status[source]['urls_processed'] += 1
             logger.info(f"Received {len(new_urls)} new URLs from crawler {source}")
         
         elif tag == 99:  # Heartbeat
-            self.crawler_status[source]['last_heartbeat'] = datetime.now()
-            self.crawler_status[source]['active'] = True
             logger.debug(f"Received heartbeat from crawler {source}")
         
         elif tag == 999:  # Error
@@ -69,23 +105,13 @@ class MasterNode:
                             if status['active']]
         
         for crawler in available_crawlers:
-            if self.urls_to_crawl:
+            urls_assigned = 0
+            while urls_assigned < self.url_batch_size and self.urls_to_crawl:
                 url = self.urls_to_crawl.pop()
                 self.crawled_urls.add(url)
                 self.comm.send(url, dest=crawler, tag=0)
                 logger.info(f"Assigned URL {url} to crawler {crawler}")
-
-def crawler_process(comm, rank):
-    logger.name = f'Crawler-{rank}'
-    logger.info(f"Crawler node started with rank {rank}")
-    # Crawler logic will be implemented in crawler_node.py
-    pass
-
-def indexer_process(comm, rank):
-    logger.name = f'Indexer-{rank}'
-    logger.info(f"Indexer node started with rank {rank}")
-    # Indexer logic will be implemented in indexer_node.py
-    pass
+                urls_assigned += 1
 
 def main():
     comm = MPI.COMM_WORLD
@@ -96,8 +122,7 @@ def main():
         logger.error("Not enough nodes. Need at least 3 nodes (1 master, 1 crawler, 1 indexer)")
         return
 
-    # Set process-specific logger name
-    if rank == 0:
+    if rank == 0:  # Master node
         logger.name = 'Master'
         master = MasterNode(comm, rank, size)
         master.initialize_seed_urls()
@@ -122,9 +147,11 @@ def main():
             time.sleep(1)  # Prevent CPU overuse
     
     elif rank <= size - 2:  # Crawler nodes
-        crawler_process(comm, rank)
+        from crawler_node import crawler_process
+        crawler_process()
     else:  # Indexer node
-        indexer_process(comm, rank)
+        from indexer_node import indexer_process
+        indexer_process()
 
 if __name__ == '__main__':
     main() 
