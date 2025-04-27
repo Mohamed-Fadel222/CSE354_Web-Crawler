@@ -191,4 +191,13 @@ def master_process():
         time.sleep(0.1)  # Small delay to prevent CPU overuse
 
 if __name__ == '__main__':
-    master_process() 
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+    if rank == 0:
+        master_process()
+    elif rank == 1:
+        import crawler_node
+        crawler_node.crawler_process()
+    elif rank == 2:
+        import indexer_node
+        indexer_node.indexer_process() 
