@@ -144,20 +144,16 @@ def master_process():
     logger.name = 'Master'
     logger.info(f"Master node started with rank {rank} of {size}")
     
+    # Initialize MasterNode
+    master = MasterNode(comm, rank, size)
+    master.initialize_seed_urls()
+    
+    logger.info(f"Active Crawler Nodes: {master.active_crawler_nodes}")
+    logger.info(f"Active Indexer Nodes: {master.active_indexer_nodes}")
+    
     # Initialize crawler and indexer status
-    crawler_status = {1: {'processed': 0, 'last_heartbeat': time.time()}}
-    indexer_status = {2: {'last_heartbeat': time.time()}}
-    
-    # Start with seed URLs
-    urls_queue = deque([
-        'http://example.com',
-        'http://httpbin.org',
-        'http://httpstat.us',
-        'http://example.org',
-        'http://example.net'
-    ])
-    
-    logger.info(f"Initialized with seed URLs: {list(urls_queue)}")
+    crawler_status = {node: {'processed': 0, 'last_heartbeat': time.time()} for node in master.active_crawler_nodes}
+    indexer_status = {node: {'last_heartbeat': time.time()} for node in master.active_indexer_nodes}
     
     # Main loop
     last_status_time = time.time()
@@ -166,7 +162,7 @@ def master_process():
         
         # Display status every 10 seconds
         if current_time - last_status_time >= 10:
-            display_status(master, crawler_status, indexer_status, urls_queue)
+            display_status(master, crawler_status, indexer_status, master.urls_to_crawl)
             last_status_time = current_time
         
         # Check for messages from crawlers and indexer
@@ -187,14 +183,10 @@ def master_process():
                     crawler_status[source]['processed'] = message
             elif tag == 1:  # New URLs from crawler
                 if isinstance(message, list):
-                    urls_queue.extend(message)
+                    master.urls_to_crawl.update(message)
         
         # Assign URLs to crawlers
-        for crawler_rank in master.active_crawler_nodes:
-            if urls_queue and crawler_rank in crawler_status:
-                url = urls_queue.popleft()
-                comm.send(url, dest=crawler_rank, tag=0)
-                logger.info(f"Assigned URL {url} to crawler {crawler_rank}")
+        master.assign_tasks()
         
         time.sleep(0.1)  # Small delay to prevent CPU overuse
 
