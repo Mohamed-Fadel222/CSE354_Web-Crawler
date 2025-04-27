@@ -132,6 +132,7 @@ def crawler_process():
     logger.name = f'Crawler-{rank}'
     logger.info(f"Crawler node started with rank {rank}")
     crawler = Crawler()
+    processed_urls = 0  # Add counter for processed URLs
     
     # Start heartbeat thread
     heartbeat = HeartbeatThread(comm, rank)
@@ -154,6 +155,10 @@ def crawler_process():
 
                 logger.info(f"Processing URL: {url_to_crawl}")
                 crawler.visited_urls.add(url_to_crawl)
+                processed_urls += 1  # Increment counter
+                
+                # Send status update to master
+                comm.send(processed_urls, dest=0, tag=100)  # Send processed URLs count
                 
                 # Fetch and parse the page
                 html = crawler.fetch_page(url_to_crawl)

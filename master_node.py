@@ -5,6 +5,7 @@ import boto3
 import os
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
+from collections import deque
 
 # Load environment variables
 load_dotenv()
@@ -113,45 +114,89 @@ class MasterNode:
                 logger.info(f"Assigned URL {url} to crawler {crawler}")
                 urls_assigned += 1
 
-def main():
+def display_status(master, crawler_status, indexer_status, urls_queue):
+    """Display system status"""
+    logger.info("\n=== System Status ===")
+    logger.info(f"URLs Queue Size: {len(urls_queue)}")
+    logger.info(f"Total URLs Crawled: {sum(status['processed'] for status in crawler_status.values())}")
+    logger.info("\nCrawler Status:")
+    for node, status in crawler_status.items():
+        time_since_heartbeat = time.time() - status['last_heartbeat']
+        status_symbol = "🟢" if time_since_heartbeat < 20 else "🔴"
+        logger.info(f"Crawler {node}: {status_symbol} ACTIVE")
+        logger.info(f"  ├─ URLs Processed: {status['processed']}")
+        logger.info(f"  └─ Last Heartbeat: {int(time_since_heartbeat)}s ago")
+    
+    logger.info("\nSystem Health:")
+    logger.info(f"Active Crawlers: {len(crawler_status)}/{len(master.active_crawler_nodes)}")
+    logger.info(f"Processing Rate: {sum(status['processed'] for status in crawler_status.values()) / 60:.2f} URLs/minute")
+    logger.info("==================")
+
+def master_process():
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     size = comm.Get_size()
     
-    if size < 3:  # Need at least 1 master, 1 crawler, and 1 indexer
+    if size < 3:
         logger.error("Not enough nodes. Need at least 3 nodes (1 master, 1 crawler, 1 indexer)")
         return
-
-    if rank == 0:  # Master node
-        logger.name = 'Master'
-        master = MasterNode(comm, rank, size)
-        master.initialize_seed_urls()
-        
-        logger.info(f"Master node started with rank {rank} of {size}")
-        logger.info(f"Active Crawler Nodes: {master.active_crawler_nodes}")
-        logger.info(f"Active Indexer Nodes: {master.active_indexer_nodes}")
-
-        while True:
-            # Check for messages from crawlers
-            if comm.iprobe(source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG):
-                status = MPI.Status()
-                data = comm.recv(source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG, status=status)
-                master.process_crawler_message(status.Get_source(), status.Get_tag(), data)
-
-            # Check crawler health
-            master.check_crawler_health()
-
-            # Assign new tasks
-            master.assign_tasks()
-
-            time.sleep(1)  # Prevent CPU overuse
     
-    elif rank <= size - 2:  # Crawler nodes
-        from crawler_node import crawler_process
-        crawler_process()
-    else:  # Indexer node
-        from indexer_node import indexer_process
-        indexer_process()
+    logger.name = 'Master'
+    logger.info(f"Master node started with rank {rank} of {size}")
+    
+    # Initialize crawler and indexer status
+    crawler_status = {1: {'processed': 0, 'last_heartbeat': time.time()}}
+    indexer_status = {2: {'last_heartbeat': time.time()}}
+    
+    # Start with seed URLs
+    urls_queue = deque([
+        'http://example.com',
+        'http://httpbin.org',
+        'http://httpstat.us',
+        'http://example.org',
+        'http://example.net'
+    ])
+    
+    logger.info(f"Initialized with seed URLs: {list(urls_queue)}")
+    
+    # Main loop
+    last_status_time = time.time()
+    while True:
+        current_time = time.time()
+        
+        # Display status every 10 seconds
+        if current_time - last_status_time >= 10:
+            display_status(master, crawler_status, indexer_status, urls_queue)
+            last_status_time = current_time
+        
+        # Check for messages from crawlers and indexer
+        if comm.Iprobe(source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG):
+            status = MPI.Status()
+            message = comm.recv(source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG, status=status)
+            
+            source = status.Get_source()
+            tag = status.Get_tag()
+            
+            if tag == 99:  # Heartbeat
+                if source in crawler_status:
+                    crawler_status[source]['last_heartbeat'] = time.time()
+                elif source in indexer_status:
+                    indexer_status[source]['last_heartbeat'] = time.time()
+            elif tag == 100:  # Processed URLs count
+                if source in crawler_status:
+                    crawler_status[source]['processed'] = message
+            elif tag == 1:  # New URLs from crawler
+                if isinstance(message, list):
+                    urls_queue.extend(message)
+        
+        # Assign URLs to crawlers
+        for crawler_rank in master.active_crawler_nodes:
+            if urls_queue and crawler_rank in crawler_status:
+                url = urls_queue.popleft()
+                comm.send(url, dest=crawler_rank, tag=0)
+                logger.info(f"Assigned URL {url} to crawler {crawler_rank}")
+        
+        time.sleep(0.1)  # Small delay to prevent CPU overuse
 
 if __name__ == '__main__':
-    main() 
+    master_process() 
