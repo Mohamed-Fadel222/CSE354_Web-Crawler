@@ -32,11 +32,7 @@ class MasterNode:
     def initialize_seed_urls(self):
         # Start with simple, reliable websites
         seed_urls = [
-            "http://example.com",
-            "http://httpbin.org",
-            "http://httpstat.us",
-            "http://example.org",
-            "http://example.net"
+          
         ]
         self.urls_to_crawl.update(seed_urls)
         logger.info(f"Initialized with seed URLs: {seed_urls}")

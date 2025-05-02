@@ -1,19 +1,228 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <meta charset="utf-8">
-  <title>URL Crawler</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web Crawler Search Interface</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+            color: #333;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            font-size: 24px;
+            margin-bottom: 20px;
+        }
+        .search-form {
+            display: flex;
+            margin-bottom: 20px;
+        }
+        .search-input {
+            flex-grow: 1;
+            padding: 10px;
+            font-size: 16px;
+            border: 1px solid #ddd;
+            border-radius: 4px 0 0 4px;
+        }
+        .search-button {
+            padding: 10px 20px;
+            background-color: #4285f4;
+            color: white;
+            font-size: 16px;
+            border: none;
+            border-radius: 0 4px 4px 0;
+            cursor: pointer;
+        }
+        .search-button:hover {
+            background-color: #357ae8;
+        }
+        .results {
+            margin-top: 20px;
+        }
+        .result-item {
+            padding: 15px;
+            border-bottom: 1px solid #eee;
+            margin-bottom: 15px;
+        }
+        .result-item:last-child {
+            border-bottom: none;
+        }
+        .result-title {
+            color: #1a0dab;
+            font-size: 18px;
+            text-decoration: none;
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        .result-title:hover {
+            text-decoration: underline;
+        }
+        .result-url {
+            color: #006621;
+            font-size: 14px;
+            margin-bottom: 5px;
+            word-break: break-all;
+        }
+        .result-snippet {
+            color: #545454;
+            font-size: 14px;
+            line-height: 1.5;
+            margin-top: 5px;
+        }
+        .result-meta {
+            color: #888;
+            font-size: 12px;
+            margin-top: 5px;
+            display: flex;
+            justify-content: space-between;
+        }
+        .highlight {
+            background-color: #FFFFD0;
+            font-weight: bold;
+        }
+        .no-results {
+            text-align: center;
+            color: #666;
+            padding: 20px;
+        }
+        .loading {
+            text-align: center;
+            padding: 20px;
+            display: none;
+        }
+        .search-stats {
+            font-size: 13px;
+            color: #666;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #eee;
+        }
+        .status-bar {
+            font-size: 12px;
+            color: #888;
+            margin-top: 20px;
+            padding-top: 15px;
+            border-top: 1px solid #eee;
+            text-align: center;
+        }
+    </style>
 </head>
 <body>
-  <h1>Submit URLs to Crawl</h1>
-  {% if sent %}
-    <p style="color:green;">Sent {{ sent }} URL(s) to crawler!</p>
-  {% endif %}
-  <form method="post">
-    <textarea name="urls" rows="5" cols="50"
-      placeholder="Enter one URL per line">{{ request.form.urls }}</textarea><br>
-    <button type="submit">Crawl these URLs</button>
-  </form>
-  <p><a href="{{ url_for('search') }}">Go to Search</a></p>
+    <div class="container">
+        <h1>Web Crawler Search</h1>
+        <div class="search-form">
+            <input type="text" id="search-input" class="search-input" placeholder="Enter your search query...">
+            <button id="search-button" class="search-button">Search</button>
+        </div>
+        <div id="search-stats" class="search-stats" style="display:none;"></div>
+        <div id="loading" class="loading">Searching...</div>
+        <div id="results" class="results"></div>
+        <div id="status-bar" class="status-bar">Loading system status...</div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const searchInput = document.getElementById('search-input');
+            const searchButton = document.getElementById('search-button');
+            const resultsContainer = document.getElementById('results');
+            const loadingElement = document.getElementById('loading');
+            const searchStats = document.getElementById('search-stats');
+            const statusBar = document.getElementById('status-bar');
+
+            // Load system status
+            fetch('/api/status')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'online') {
+                        statusBar.textContent = `System online | ${data.indexed_documents} documents indexed`;
+                    } else {
+                        statusBar.textContent = `System status: ${data.status}`;
+                    }
+                })
+                .catch(error => {
+                    statusBar.textContent = 'System status: unavailable';
+                });
+
+            // Format timestamp to readable date
+            function formatDate(timestamp) {
+                if (!timestamp) return '';
+                const date = new Date(timestamp * 1000);
+                return date.toLocaleDateString();
+            }
+
+            // Function to perform search
+            function performSearch() {
+                const query = searchInput.value.trim();
+                if (!query) return;
+
+                // Show loading indicator
+                loadingElement.style.display = 'block';
+                resultsContainer.innerHTML = '';
+                searchStats.style.display = 'none';
+
+                // Fetch search results
+                fetch(`/search?q=${encodeURIComponent(query)}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        loadingElement.style.display = 'none';
+                        
+                        if (data.message) {
+                            resultsContainer.innerHTML = `<div class="no-results">${data.message}</div>`;
+                            return;
+                        }
+
+                        if (data.results.length === 0) {
+                            resultsContainer.innerHTML = '<div class="no-results">No results found</div>';
+                            return;
+                        }
+
+                        // Show search stats
+                        searchStats.style.display = 'block';
+                        searchStats.textContent = `Found ${data.count} results for "${data.query}"`;
+
+                        // Display results
+                        const resultsHtml = data.results.map(result => `
+                            <div class="result-item">
+                                <a href="${result.url}" class="result-title" target="_blank">${result.title}</a>
+                                <div class="result-url">${result.domain}</div>
+                                <div class="result-snippet">${result.snippet}</div>
+                                <div class="result-meta">
+                                    <span>Score: ${result.score.toFixed(2)}</span>
+                                    <span>Crawled: ${formatDate(result.timestamp)}</span>
+                                </div>
+                            </div>
+                        `).join('');
+
+                        resultsContainer.innerHTML = resultsHtml;
+                    })
+                    .catch(error => {
+                        loadingElement.style.display = 'none';
+                        resultsContainer.innerHTML = `<div class="no-results">Error: ${error.message}</div>`;
+                    });
+            }
+
+            // Event listeners
+            searchButton.addEventListener('click', performSearch);
+            searchInput.addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') {
+                    performSearch();
+                }
+            });
+        });
+    </script>
 </body>
-</html>
+</html> 

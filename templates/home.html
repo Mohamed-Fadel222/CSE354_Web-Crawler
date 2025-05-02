@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web Crawler Search Interface</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+            color: #333;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            font-size: 24px;
+            margin-bottom: 10px;
+        }
+        h2 {
+            color: #444;
+            font-size: 18px;
+            margin-top: 25px;
+            margin-bottom: 15px;
+            border-bottom: 1px solid #eee;
+            padding-bottom: 5px;
+        }
+        .search-form, .crawl-form {
+            display: flex;
+            margin-bottom: 20px;
+        }
+        .search-input, .crawl-input {
+            flex-grow: 1;
+            padding: 10px;
+            font-size: 16px;
+            border: 1px solid #ddd;
+            border-radius: 4px 0 0 4px;
+        }
+        .search-button, .crawl-button, .settings-button {
+            padding: 10px 20px;
+            background-color: #4285f4;
+            color: white;
+            font-size: 16px;
+            border: none;
+            border-radius: 0 4px 4px 0;
+            cursor: pointer;
+        }
+        .search-button:hover, .crawl-button:hover, .settings-button:hover {
+            background-color: #357ae8;
+        }
+        .crawl-button {
+            background-color: #34a853;
+        }
+        .crawl-button:hover {
+            background-color: #2d9348;
+        }
+        .settings-button {
+            background-color: #f57c00;
+            border-radius: 4px;
+            margin-left: 10px;
+        }
+        .settings-button:hover {
+            background-color: #e65100;
+        }
+        .results {
+            margin-top: 20px;
+        }
+        .result-item {
+            padding: 15px;
+            border-bottom: 1px solid #eee;
+            margin-bottom: 15px;
+        }
+        .result-item:last-child {
+            border-bottom: none;
+        }
+        .result-title {
+            color: #1a0dab;
+            font-size: 18px;
+            text-decoration: none;
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        .result-title:hover {
+            text-decoration: underline;
+        }
+        .result-url {
+            color: #006621;
+            font-size: 14px;
+            margin-bottom: 5px;
+            word-break: break-all;
+        }
+        .result-snippet {
+            color: #545454;
+            font-size: 14px;
+            line-height: 1.5;
+            margin-top: 5px;
+        }
+        .result-meta {
+            color: #888;
+            font-size: 12px;
+            margin-top: 5px;
+            display: flex;
+            justify-content: space-between;
+        }
+        .highlight {
+            background-color: #FFFFD0;
+            font-weight: bold;
+        }
+        .no-results {
+            text-align: center;
+            color: #666;
+            padding: 20px;
+        }
+        .loading {
+            text-align: center;
+            padding: 20px;
+            display: none;
+        }
+        .search-stats {
+            font-size: 13px;
+            color: #666;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #eee;
+        }
+        .status-bar {
+            font-size: 12px;
+            color: #888;
+            margin-top: 20px;
+            padding-top: 15px;
+            border-top: 1px solid #eee;
+            text-align: center;
+        }
+        .crawl-result {
+            background-color: #f8f8f8;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 15px;
+            margin-top: 15px;
+            display: none;
+        }
+        .crawl-success {
+            color: #34a853;
+            font-weight: bold;
+        }
+        .crawl-error {
+            color: #ea4335;
+            font-weight: bold;
+        }
+        .tab-container {
+            margin-top: 15px;
+        }
+        .tabs {
+            display: flex;
+            border-bottom: 1px solid #ddd;
+        }
+        .tab {
+            padding: 10px 15px;
+            cursor: pointer;
+            background-color: #f1f1f1;
+            border: 1px solid #ddd;
+            border-bottom: none;
+            margin-right: 5px;
+            border-radius: 4px 4px 0 0;
+        }
+        .tab.active {
+            background-color: white;
+            border-bottom: 1px solid white;
+            margin-bottom: -1px;
+            font-weight: bold;
+        }
+        .tab-content {
+            display: none;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-top: none;
+        }
+        .tab-content.active {
+            display: block;
+        }
+        .error-fix {
+            background-color: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .fix-button {
+            background-color: #dc3545;
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            border-radius: 3px;
+            cursor: pointer;
+        }
+        .fix-button:hover {
+            background-color: #c82333;
+        }
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.5);
+            z-index: 1000;
+        }
+        .modal-content {
+            background-color: white;
+            margin: 10% auto;
+            padding: 20px;
+            width: 50%;
+            border-radius: 5px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        }
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #eee;
+            padding-bottom: 10px;
+            margin-bottom: 15px;
+        }
+        .modal-title {
+            font-size: 18px;
+            font-weight: bold;
+        }
+        .close-button {
+            font-size: 24px;
+            cursor: pointer;
+            color: #aaa;
+        }
+        .close-button:hover {
+            color: #333;
+        }
+        .settings-form {
+            margin-bottom: 15px;
+        }
+        .form-group {
+            margin-bottom: 10px;
+        }
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 60px;
+            height: 34px;
+        }
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: .4s;
+            border-radius: 34px;
+        }
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 26px;
+            width: 26px;
+            left: 4px;
+            bottom: 4px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+        input:checked + .slider {
+            background-color: #2196F3;
+        }
+        input:focus + .slider {
+            box-shadow: 0 0 1px #2196F3;
+        }
+        input:checked + .slider:before {
+            transform: translateX(26px);
+        }
+        .settings-success {
+            color: #34a853;
+            margin-top: 10px;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Web Crawler & Search Engine</h1>
+        
+        <div class="tab-container">
+            <div class="tabs">
+                <div class="tab active" data-tab="search">Search Content</div>
+                <div class="tab" data-tab="crawl">Add URL to Crawl</div>
+            </div>
+            
+            <div id="search-tab" class="tab-content active">
+                <h2>Search Crawled Content</h2>
+                <div class="search-form">
+                    <input type="text" id="search-input" class="search-input" placeholder="Enter your search query...">
+                    <button id="search-button" class="search-button">Search</button>
+                </div>
+                <div id="search-stats" class="search-stats" style="display:none;"></div>
+                <div id="loading" class="loading">Searching...</div>
+                <div id="results" class="results"></div>
+            </div>
+            
+            <div id="crawl-tab" class="tab-content">
+                <h2>Add New URL to Crawl</h2>
+                <div class="crawl-form">
+                    <input type="text" id="crawl-input" class="crawl-input" placeholder="Enter URL to crawl (e.g., https://example.com)">
+                    <button id="crawl-button" class="crawl-button">Crawl URL</button>
+                    <button id="settings-button" class="settings-button">Settings</button>
+                </div>
+                <div id="crawl-loading" class="loading">Crawling URL...</div>
+                <div id="crawl-result" class="crawl-result"></div>
+            </div>
+        </div>
+        
+        <div id="status-bar" class="status-bar">Loading system status...</div>
+    </div>
+    
+    <!-- Settings Modal -->
+    <div id="settings-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <span class="modal-title">Storage Settings</span>
+                <span class="close-button">&times;</span>
+            </div>
+            <div class="settings-form">
+                <div class="form-group">
+                    <label>
+                        Use Local Storage: 
+                        <label class="switch">
+                            <input type="checkbox" id="use-local-storage">
+                            <span class="slider"></span>
+                        </label>
+                    </label>
+                    <p>When enabled, content will be stored locally instead of in AWS S3.</p>
+                </div>
+                <button id="save-settings" class="search-button">Save Settings</button>
+                <div id="settings-success" class="settings-success">Settings saved successfully!</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // DOM elements
+            const searchInput = document.getElementById('search-input');
+            const searchButton = document.getElementById('search-button');
+            const resultsContainer = document.getElementById('results');
+            const loadingElement = document.getElementById('loading');
+            const searchStats = document.getElementById('search-stats');
+            const statusBar = document.getElementById('status-bar');
+            const crawlInput = document.getElementById('crawl-input');
+            const crawlButton = document.getElementById('crawl-button');
+            const crawlLoading = document.getElementById('crawl-loading');
+            const crawlResult = document.getElementById('crawl-result');
+            const tabs = document.querySelectorAll('.tab');
+            const tabContents = document.querySelectorAll('.tab-content');
+            
+            // Settings modal elements
+            const settingsButton = document.getElementById('settings-button');
+            const settingsModal = document.getElementById('settings-modal');
+            const closeButton = document.querySelector('.close-button');
+            const useLocalStorage = document.getElementById('use-local-storage');
+            const saveSettings = document.getElementById('save-settings');
+            const settingsSuccess = document.getElementById('settings-success');
+
+            // Tab switching
+            tabs.forEach(tab => {
+                tab.addEventListener('click', function() {
+                    const tabId = this.getAttribute('data-tab');
+                    
+                    // Update active tab
+                    tabs.forEach(t => t.classList.remove('active'));
+                    this.classList.add('active');
+                    
+                    // Show corresponding content
+                    tabContents.forEach(content => {
+                        content.classList.remove('active');
+                    });
+                    document.getElementById(`${tabId}-tab`).classList.add('active');
+                });
+            });
+            
+            // Settings modal
+            settingsButton.addEventListener('click', function() {
+                settingsModal.style.display = 'block';
+                
+                // Get current settings
+                fetch('/api/status')
+                    .then(response => response.json())
+                    .then(data => {
+                        useLocalStorage.checked = data.use_local_storage;
+                    });
+            });
+            
+            closeButton.addEventListener('click', function() {
+                settingsModal.style.display = 'none';
+            });
+            
+            window.addEventListener('click', function(event) {
+                if (event.target === settingsModal) {
+                    settingsModal.style.display = 'none';
+                }
+            });
+            
+            saveSettings.addEventListener('click', function() {
+                const formData = new FormData();
+                formData.append('use_local_storage', useLocalStorage.checked);
+                
+                fetch('/storage-settings', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(response => response.json())
+                .then(data => {
+                    settingsSuccess.style.display = 'block';
+                    setTimeout(function() {
+                        settingsSuccess.style.display = 'none';
+                    }, 3000);
+                });
+            });
+
+            // Load system status
+            fetch('/api/status')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'online') {
+                        let statusText = `System online | ${data.indexed_documents} documents indexed`;
+                        statusText += ` | Storage: ${data.storage_type}`;
+                        if (data.storage_type === 's3' && data.s3_bucket) {
+                            statusText += ` (${data.s3_bucket})`;
+                        }
+                        statusBar.textContent = statusText;
+                    } else {
+                        statusBar.textContent = `System status: ${data.status}`;
+                    }
+                })
+                .catch(error => {
+                    statusBar.textContent = 'System status: unavailable';
+                });
+
+            // Format timestamp to readable date
+            function formatDate(timestamp) {
+                if (!timestamp) return '';
+                const date = new Date(timestamp * 1000);
+                return date.toLocaleDateString();
+            }
+
+            // Function to perform search
+            function performSearch() {
+                const query = searchInput.value.trim();
+                if (!query) return;
+
+                // Show loading indicator
+                loadingElement.style.display = 'block';
+                resultsContainer.innerHTML = '';
+                searchStats.style.display = 'none';
+
+                // Fetch search results
+                fetch(`/search?q=${encodeURIComponent(query)}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        loadingElement.style.display = 'none';
+                        
+                        if (data.message) {
+                            resultsContainer.innerHTML = `<div class="no-results">${data.message}</div>`;
+                            return;
+                        }
+
+                        if (data.results.length === 0) {
+                            resultsContainer.innerHTML = '<div class="no-results">No results found</div>';
+                            return;
+                        }
+
+                        // Show search stats
+                        searchStats.style.display = 'block';
+                        searchStats.textContent = `Found ${data.count} results for "${data.query}"`;
+
+                        // Display results
+                        const resultsHtml = data.results.map(result => {
+                            let html = `
+                                <div class="result-item">
+                                    <a href="${result.url}" class="result-title" target="_blank">${result.title}</a>
+                                    <div class="result-url">${result.domain}</div>
+                            `;
+                            
+                            if (result.snippet.includes("Error retrieving content")) {
+                                html += `
+                                    <div class="error-fix">
+                                        <span>Error retrieving content</span>
+                                        <button class="fix-button" data-url="${result.url}">Re-crawl</button>
+                                    </div>
+                                `;
+                            } else {
+                                html += `<div class="result-snippet">${result.snippet}</div>`;
+                            }
+                            
+                            html += `
+                                    <div class="result-meta">
+                                        <span>Score: ${result.score.toFixed(2)}</span>
+                                        <span>Crawled: ${formatDate(result.timestamp)}</span>
+                                    </div>
+                                </div>
+                            `;
+                            
+                            return html;
+                        }).join('');
+
+                        resultsContainer.innerHTML = resultsHtml;
+                        
+                        // Add event listeners to fix buttons
+                        document.querySelectorAll('.fix-button').forEach(button => {
+                            button.addEventListener('click', function() {
+                                const url = this.getAttribute('data-url');
+                                fixContentError(url, this.parentElement);
+                            });
+                        });
+                    })
+                    .catch(error => {
+                        loadingElement.style.display = 'none';
+                        resultsContainer.innerHTML = `<div class="no-results">Error: ${error.message}</div>`;
+                    });
+            }
+            
+            // Function to fix content error
+            function fixContentError(url, errorElement) {
+                errorElement.innerHTML = 'Re-crawling URL...';
+                
+                const formData = new FormData();
+                formData.append('url', url);
+                
+                fetch('/fix-content-error', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        errorElement.innerHTML = 'Content fixed! Refreshing results...';
+                        setTimeout(performSearch, 1000);
+                        
+                        // Update system status
+                        fetch('/api/status')
+                            .then(response => response.json())
+                            .then(statusData => {
+                                if (statusData.status === 'online') {
+                                    let statusText = `System online | ${statusData.indexed_documents} documents indexed`;
+                                    statusText += ` | Storage: ${statusData.storage_type}`;
+                                    if (statusData.storage_type === 's3' && statusData.s3_bucket) {
+                                        statusText += ` (${statusData.s3_bucket})`;
+                                    }
+                                    statusBar.textContent = statusText;
+                                }
+                            });
+                    } else {
+                        errorElement.innerHTML = `Failed to fix: ${data.message}`;
+                    }
+                })
+                .catch(error => {
+                    errorElement.innerHTML = `Error: ${error.message}`;
+                });
+            }
+
+            // Function to crawl URL
+            function crawlURL() {
+                const url = crawlInput.value.trim();
+                if (!url) return;
+
+                // Show loading indicator
+                crawlLoading.style.display = 'block';
+                crawlResult.style.display = 'none';
+
+                // Create form data
+                const formData = new FormData();
+                formData.append('url', url);
+
+                // Send crawl request
+                fetch('/crawl', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(response => response.json())
+                .then(data => {
+                    crawlLoading.style.display = 'none';
+                    crawlResult.style.display = 'block';
+
+                    if (data.success) {
+                        // Format URLs as links
+                        const urlsList = data.extracted_urls && data.extracted_urls.length > 0 
+                            ? `<ul>${data.extracted_urls.map(url => `<li><a href="${url}" target="_blank">${url}</a></li>`).join('')}</ul>`
+                            : '<p>No links found on page</p>';
+                            
+                        crawlResult.innerHTML = `
+                            <h3 class="crawl-success">Successfully Crawled!</h3>
+                            <p><strong>URL:</strong> ${data.url}</p>
+                            <p><strong>Content Size:</strong> ${data.text_length} characters</p>
+                            <p><strong>Storage Type:</strong> ${data.storage_type}</p>
+                            <p><strong>Found ${data.urls_found} URLs:</strong></p>
+                            ${urlsList}
+                            <p>The content has been indexed and is now searchable.</p>
+                        `;
+                        
+                        // Update status bar with new document count
+                        fetch('/api/status')
+                            .then(response => response.json())
+                            .then(status => {
+                                if (status.status === 'online') {
+                                    let statusText = `System online | ${status.indexed_documents} documents indexed`;
+                                    statusText += ` | Storage: ${status.storage_type}`;
+                                    if (status.storage_type === 's3' && status.s3_bucket) {
+                                        statusText += ` (${status.s3_bucket})`;
+                                    }
+                                    statusBar.textContent = statusText;
+                                }
+                            });
+                    } else {
+                        crawlResult.innerHTML = `
+                            <h3 class="crawl-error">Crawl Failed</h3>
+                            <p>${data.message || 'Unknown error'}</p>
+                            <p>Please check the URL and try again.</p>
+                        `;
+                    }
+                })
+                .catch(error => {
+                    crawlLoading.style.display = 'none';
+                    crawlResult.style.display = 'block';
+                    crawlResult.innerHTML = `
+                        <h3 class="crawl-error">Error</h3>
+                        <p>${error.message}</p>
+                    `;
+                });
+            }
+
+            // Event listeners
+            searchButton.addEventListener('click', performSearch);
+            searchInput.addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') {
+                    performSearch();
+                }
+            });
+            
+            crawlButton.addEventListener('click', crawlURL);
+            crawlInput.addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') {
+                    crawlURL();
+                }
+            });
+        });
+    </script>
+</body>
+</html> 
