@@ -1,4 +1,3 @@
-from mpi4py import MPI
 import logging
 import boto3
 import os
@@ -71,9 +70,8 @@ class Indexer:
             body = json.loads(message['Body'])
             url = body['url']
             content = body['content']
-            crawler_rank = body.get('crawler_rank', 'unknown')
             
-            logger.info(f"Processing content from {url} (crawler {crawler_rank})")
+            logger.info(f"Processing content from {url}")
             self.index_document(url, content)
             
             # Delete the message from the queue
@@ -117,26 +115,13 @@ class Indexer:
                     for message in response['Messages']:
                         self.process_sqs_message(message)
 
-                # Check for search requests from master
-                if self.comm.iprobe(source=0, tag=1):  # Tag 1 for search requests
-                    query = self.comm.recv(source=0, tag=1)
-                    results = self.search(query)
-                    self.comm.send(results, dest=0, tag=2)  # Tag 2 for search results
-
             except Exception as e:
                 logger.error(f"Error in indexer loop: {str(e)}")
                 time.sleep(5)  # Wait before retrying
 
 def indexer_process():
-    comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()
-    size = comm.Get_size()
-    
-    logger.name = f'Indexer-{rank}'
-    logger.info(f"Indexer node started with rank {rank}")
+    logger.info("Indexer node started")
     indexer = Indexer()
-
-    indexer.comm = comm
     indexer.indexer_loop()
 
 if __name__ == '__main__':

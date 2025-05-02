@@ -1,4 +1,3 @@
-from mpi4py import MPI
 import time
 import logging
 import requests
@@ -10,7 +9,6 @@ from dotenv import load_dotenv
 import json
 import urllib3
 import warnings
-from threading import Thread, Event
 
 # Suppress warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -29,6 +27,7 @@ logger = logging.getLogger('Crawler')
 # AWS Configuration
 AWS_REGION = os.getenv('AWS_REGION', 'eu-north-1')
 SQS_QUEUE_URL = os.getenv('SQS_QUEUE_URL')
+SQS_URLS_QUEUE = os.getenv('SQS_URLS_QUEUE')  # Queue for URLs to crawl
 logger.info(f"Using SQS Queue URL: {SQS_QUEUE_URL}")
 logger.info(f"Using AWS Region: {AWS_REGION}")
 sqs_client = boto3.client('sqs', region_name=AWS_REGION)
@@ -105,102 +104,97 @@ class Crawler:
         except Exception:
             return False
 
-class HeartbeatThread(Thread):
-    def __init__(self, comm, rank):
-        super().__init__()
-        self.comm = comm
-        self.rank = rank
-        self.stop_event = Event()
-        self.daemon = True  # Thread will exit when main program exits
+    def process_url(self, url):
+        if url in self.visited_urls:
+            logger.info(f"Already visited {url}, skipping")
+            return
 
-    def run(self):
-        while not self.stop_event.is_set():
-            try:
-                self.comm.send("alive", dest=0, tag=99)
-                logger.debug(f"Heartbeat sent from crawler {self.rank}")
-            except Exception as e:
-                logger.error(f"Error sending heartbeat: {str(e)}")
-            time.sleep(10)  # Send heartbeat every 10 seconds
-
-    def stop(self):
-        self.stop_event.set()
+        logger.info(f"Processing URL: {url}")
+        self.visited_urls.add(url)
+        
+        # Fetch and parse the page
+        html = self.fetch_page(url)
+        if html:
+            # Extract URLs and text content
+            extracted_urls = self.extract_urls(html, url)
+            extracted_text = self.extract_text(html)
+            
+            if extracted_text:
+                # Send extracted URLs to the URLs queue
+                for new_url in extracted_urls:
+                    try:
+                        sqs_client.send_message(
+                            QueueUrl=SQS_URLS_QUEUE,
+                            MessageBody=json.dumps({'url': new_url})
+                        )
+                        logger.info(f"Sent new URL to queue: {new_url}")
+                    except Exception as e:
+                        logger.error(f"Error sending URL to queue: {str(e)}")
+                
+                # Send content to indexer queue
+                message_body = {
+                    'url': url,
+                    'content': extracted_text[:1000],  # Limit content size
+                }
+                
+                try:
+                    sqs_client.send_message(
+                        QueueUrl=SQS_QUEUE_URL,
+                        MessageBody=json.dumps(message_body)
+                    )
+                    logger.info(f"Sent content to SQS for {url}")
+                except Exception as e:
+                    logger.error(f"Error sending to SQS: {str(e)}")
 
 def crawler_process():
-    comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()
-    
-    logger.name = f'Crawler-{rank}'
-    logger.info(f"Crawler node started with rank {rank}")
+    logger.info("Crawler node started")
     crawler = Crawler()
-    processed_urls = 0  # Add counter for processed URLs
     
-    # Start heartbeat thread
-    heartbeat = HeartbeatThread(comm, rank)
-    heartbeat.start()
-    
-    try:
-        while True:
-            try:
-                # Receive URL from master
-                status = MPI.Status()
-                url_to_crawl = comm.recv(source=0, tag=0, status=status)
-                
-                if not url_to_crawl:
-                    logger.info(f"Crawler {rank} received shutdown signal. Exiting.")
-                    break
+    while True:
+        try:
+            # Receive URL from SQS
+            response = sqs_client.receive_message(
+                QueueUrl=SQS_URLS_QUEUE,
+                MaxNumberOfMessages=1,
+                WaitTimeSeconds=20,
+                VisibilityTimeout=30
+            )
 
-                if url_to_crawl in crawler.visited_urls:
-                    logger.info(f"Already visited {url_to_crawl}, skipping")
-                    continue
-
-                logger.info(f"Processing URL: {url_to_crawl}")
-                crawler.visited_urls.add(url_to_crawl)
-                processed_urls += 1  # Increment counter
-                
-                # Send status update to master
-                comm.send(processed_urls, dest=0, tag=100)  # Send processed URLs count
-                
-                # Fetch and parse the page
-                html = crawler.fetch_page(url_to_crawl)
-                if html:
-                    # Extract URLs and text content
-                    extracted_urls = crawler.extract_urls(html, url_to_crawl)
-                    extracted_text = crawler.extract_text(html)
+            if 'Messages' in response:
+                for message in response['Messages']:
+                    try:
+                        body = json.loads(message['Body'])
+                        url = body['url']
+                        
+                        # Process the URL
+                        crawler.process_url(url)
+                        
+                        # Delete the message from the queue
+                        sqs_client.delete_message(
+                            QueueUrl=SQS_URLS_QUEUE,
+                            ReceiptHandle=message['ReceiptHandle']
+                        )
+                        
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Error decoding message: {str(e)}")
+                    except Exception as e:
+                        logger.error(f"Error processing message: {str(e)}")
                     
-                    if extracted_text:
-                        # Send extracted URLs back to master
-                        comm.send(extracted_urls, dest=0, tag=1)
-                        
-                        # Send content to indexer via SQS
-                        message_body = {
-                            'url': url_to_crawl,
-                            'content': extracted_text[:1000],  # Limit content size
-                            'crawler_rank': rank
-                        }
-                        
-                        try:
-                            sqs_client.send_message(
-                                QueueUrl=SQS_QUEUE_URL,
-                                MessageBody=json.dumps(message_body)
-                            )
-                            logger.info(f"Sent content to SQS for {url_to_crawl}")
-                        except Exception as e:
-                            logger.error(f"Error sending to SQS: {str(e)}")
-                
-                # Implement crawl delay
-                time.sleep(crawler.crawl_delay)
-                
-            except Exception as e:
-                logger.error(f"Error in crawler process: {str(e)}")
-                try:
-                    comm.send(f"Error processing {url_to_crawl}: {str(e)}", dest=0, tag=999)
-                except:
-                    pass
-                time.sleep(1)  # Wait before continuing
-    finally:
-        # Clean up
-        heartbeat.stop()
-        heartbeat.join()
+                    # Always try to delete the message
+                    try:
+                        sqs_client.delete_message(
+                            QueueUrl=SQS_URLS_QUEUE,
+                            ReceiptHandle=message['ReceiptHandle']
+                        )
+                    except Exception as e:
+                        logger.error(f"Error deleting message: {str(e)}")
+            
+            # Implement crawl delay
+            time.sleep(crawler.crawl_delay)
+            
+        except Exception as e:
+            logger.error(f"Error in crawler process: {str(e)}")
+            time.sleep(5)  # Wait before retrying
 
 if __name__ == '__main__':
     crawler_process()    
