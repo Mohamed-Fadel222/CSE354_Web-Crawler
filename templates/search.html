@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Search Crawled Pages</title>
+</head>
+<body>
+  <h1>Search Indexed Content</h1>
+  <form method="post">
+    <input name="query" value="{{ query }}" placeholder="Enter search keywords">
+    <button type="submit">Search</button>
+  </form>
+
+  {% if results %}
+    <h2>Results for “{{ query }}”:</h2>
+    <ul>
+      {% for url in results %}
+        <li><a href="{{ url }}" target="_blank">{{ url }}</a></li>
+      {% endfor %}
+    </ul>
+  {% elif query %}
+    <p>No matches found.</p>
+  {% endif %}
+
+  <p><a href="{{ url_for('index') }}">← Back to URL submission</a></p>
+</body>
+</html>
