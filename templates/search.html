@@ -1,27 +1,234 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Search Crawled Pages</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/tailwind.css') }}">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
 </head>
-<body>
-  <h1>Search Indexed Content</h1>
-  <form method="post">
-    <input name="query" value="{{ query }}" placeholder="Enter search keywords">
-    <button type="submit">Search</button>
-  </form>
+<body class="bg-gray-50 min-h-screen transition-colors duration-300 dark:bg-gray-900 font-sans">
+  <!-- Navigation Bar -->
+  <nav class="bg-gradient-to-r from-indigo-600 to-indigo-800 text-white shadow-lg">
+    <div class="container mx-auto px-4 py-4 flex justify-between items-center">
+      <div class="flex items-center space-x-3">
+        <div class="p-2 bg-white bg-opacity-10 rounded-lg">
+          <svg class="w-6 h-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+          </svg>
+        </div>
+        <h1 class="text-2xl font-semibold">Search Indexed Content</h1>
+      </div>
+      <div class="flex items-center space-x-4">
+        <a href="{{ url_for('index') }}" class="px-4 py-2 rounded-lg bg-white bg-opacity-10 hover:bg-opacity-20 transition-colors flex items-center shadow">
+          <svg class="w-5 h-5 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
+          </svg>
+          Dashboard
+        </a>
+        <div class="flex items-center">
+          <span class="text-sm mr-2 dark:text-gray-200">Dark Mode</span>
+          <div class="relative inline-block w-12 align-middle select-none transition duration-200 ease-in">
+            <input type="checkbox" id="darkModeToggle" class="toggle-checkbox absolute block w-6 h-6 rounded-full bg-white border-4 appearance-none cursor-pointer transition-transform duration-200 ease-in-out" />
+            <label for="darkModeToggle" class="toggle-label block overflow-hidden h-6 rounded-full bg-gray-300 cursor-pointer"></label>
+          </div>
+        </div>
+      </div>
+    </div>
+  </nav>
 
+  <!-- API Error Alert - Hidden by default -->
+  <div id="apiError" class="bg-red-100 border-l-4 border-red-500 text-red-700 px-4 py-3 rounded shadow-md mb-4 mx-4 mt-4 hidden" role="alert">
+    <div class="flex">
+      <div class="py-1"><svg class="fill-current h-6 w-6 text-red-500 mr-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M2.93 17.07A10 10 0 1 1 17.07 2.93 10 10 0 0 1 2.93 17.07zm12.73-1.41A8 8 0 1 0 4.34 4.34a8 8 0 0 0 10.24 11.32zM9 11V9h2v6H9v-4zm0-6h2v2H9V5z"/></svg></div>
+      <div>
+        <p class="font-bold">Data Sync Error</p>
+        <p class="text-sm">Unable to connect to the crawler service. Retrying...</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main Content -->
+  <div class="container mx-auto px-4 py-6">
+    <!-- Search Container -->
+    <div class="bg-white p-6 rounded-xl shadow-sm mb-8 dark:bg-gray-800 hover:shadow-md transition-all duration-300">
+      <form method="post" class="flex flex-col md:flex-row md:items-end gap-4">
+        <div class="flex-grow">
+          <label for="query" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Search Keywords</label>
+          <input 
+            id="query"
+            name="query" 
+            value="{{ query }}" 
+            placeholder="Enter search keywords" 
+            class="block w-full px-4 py-3 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 transition-colors dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+          >
+        </div>
+        <button type="submit" class="w-full md:w-auto px-6 py-3 bg-gradient-to-r from-indigo-600 to-indigo-700 text-white font-medium rounded-lg shadow-sm hover:from-indigo-700 hover:to-indigo-800 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors">
+          <span class="flex items-center justify-center">
+            <svg class="w-5 h-5 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+            Search
+          </span>
+        </button>
+      </form>
+    </div>
+
+    <!-- Results Section -->
+    {% if results %}
+      <div class="mb-6">
+        <h2 class="text-xl font-bold mb-4 text-indigo-600 dark:text-indigo-400">Results for "{{ query }}"</h2>
+        
+        <!-- Results Visualization -->
+        <div class="grid grid-cols-1 lg:grid-cols-4 gap-6">
+          <!-- Results List - Takes 3 columns -->
+          <div class="bg-white p-6 rounded-xl shadow-sm dark:bg-gray-800 lg:col-span-3 hover:shadow-md transition-all duration-300">
+            <ul class="divide-y divide-gray-200 dark:divide-gray-700">
+              {% for result in results %}
+                <li class="py-4 px-2 transition-colors duration-200 hover:bg-gray-50 dark:hover:bg-gray-700 rounded-lg">
+                  <a href="{{ result.url }}" target="_blank" class="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                    <div class="flex-grow">
+                      <h3 class="text-lg font-medium text-indigo-600 dark:text-indigo-400 hover:underline truncate">{{ result.url }}</h3>
+                      <p class="text-sm text-gray-500 dark:text-gray-400 truncate">{{ result.url }}</p>
+                    </div>
+                    <div class="bg-indigo-100 dark:bg-indigo-900 text-indigo-800 dark:text-indigo-200 text-xs font-semibold px-2.5 py-1 rounded-full w-20 text-center">
+                      Score: {{ "%.2f"|format(result.score) }}
+                    </div>
+                    <div class="text-gray-400">
+                      <svg class="w-5 h-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                      </svg>
+                    </div>
+                  </a>
+                </li>
+              {% endfor %}
+            </ul>
+          </div>
+          
+          <!-- Results Statistics - Takes 1 column -->
+          <div class="bg-white p-6 rounded-xl shadow-sm dark:bg-gray-800 hover:shadow-md transition-all duration-300">
+            <h3 class="text-lg font-medium text-gray-800 dark:text-white mb-4">Search Statistics</h3>
+            
+            <!-- Total Results Card -->
+            <div class="bg-gray-50 dark:bg-gray-700 rounded-lg p-4 shadow mb-4">
+              <div class="flex items-center justify-between">
+                <h4 class="text-sm font-medium text-gray-500 dark:text-gray-400">Total Results</h4>
+                <span class="text-xl font-bold text-indigo-600 dark:text-indigo-400">{{ results|length }}</span>
+              </div>
+            </div>
+            
+            <!-- Score Distribution Chart -->
+            <div class="bg-gray-50 dark:bg-gray-700 rounded-lg p-4 shadow mb-4">
+              <h4 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-2">Relevance Distribution</h4>
+              <div class="h-32">
+                <canvas id="scoreChart"></canvas>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    {% elif query %}
+      <div class="bg-white p-8 rounded-xl shadow-sm text-center dark:bg-gray-800 hover:shadow-md transition-all duration-300">
+        <svg class="w-16 h-16 mx-auto text-gray-400 mb-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+        <h3 class="text-xl font-medium text-gray-800 dark:text-white mb-2">No matches found</h3>
+        <p class="text-gray-500 dark:text-gray-400">Try different keywords or submit more URLs to crawl</p>
+      </div>
+    {% else %}
+      <div class="bg-white p-8 rounded-xl shadow-sm text-center dark:bg-gray-800 hover:shadow-md transition-all duration-300">
+        <svg class="w-16 h-16 mx-auto text-indigo-500 mb-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+        </svg>
+        <h3 class="text-xl font-medium text-gray-800 dark:text-white mb-2">Start searching!</h3>
+        <p class="text-gray-500 dark:text-gray-400">Enter keywords above to search through crawled content</p>
+      </div>
+    {% endif %}
+  </div>
+  
+  <!-- Footer -->
+  <footer class="py-4 bg-white dark:bg-gray-800 shadow-inner">
+    <div class="container mx-auto px-4">
+      <p class="text-center text-gray-500 text-sm dark:text-gray-400">
+        Web Crawler Dashboard &copy; 2025
+      </p>
+    </div>
+  </footer>
+
+  <!-- Score Distribution Chart Script -->
   {% if results %}
-    <h2>Results for “{{ query }}”:</h2>
-    <ul>
-      {% for url in results %}
-        <li><a href="{{ url }}" target="_blank">{{ url }}</a></li>
-      {% endfor %}
-    </ul>
-  {% elif query %}
-    <p>No matches found.</p>
+  <script>
+    // Using a safer way to inject data from Flask to JavaScript
+    document.addEventListener('DOMContentLoaded', function() {
+      const ctx = document.getElementById('scoreChart').getContext('2d');
+      
+      // Get score data from data attributes
+      const scoreElements = document.querySelectorAll('[data-score]');
+      const scores = Array.from(scoreElements).map(el => parseFloat(el.getAttribute('data-score')));
+      
+      // Count scores in ranges
+      const ranges = [0, 0.25, 0.5, 0.75, 1];
+      const counts = [0, 0, 0, 0];  // Initialize with zeros
+      
+      // Count scores in each range
+      for (let i = 0; i < scores.length; i++) {
+        const score = scores[i];
+        if (score < 0.25) counts[0]++;
+        else if (score < 0.5) counts[1]++;
+        else if (score < 0.75) counts[2]++;
+        else counts[3]++;
+      }
+      
+      // Chart labels
+      const labels = ['0-0.25', '0.25-0.5', '0.5-0.75', '0.75-1'];
+      
+      // Create pie chart
+      new Chart(ctx, {
+        type: 'pie',
+        data: {
+          labels: labels,
+          datasets: [{
+            data: counts,
+            backgroundColor: [
+              'rgba(99, 102, 241, 0.8)',
+              'rgba(139, 92, 246, 0.8)',
+              'rgba(167, 139, 250, 0.8)',
+              'rgba(196, 181, 253, 0.8)'
+            ],
+            borderColor: [
+              'rgba(99, 102, 241, 1)',
+              'rgba(139, 92, 246, 1)',
+              'rgba(167, 139, 250, 1)',
+              'rgba(196, 181, 253, 1)'
+            ],
+            borderWidth: 1
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: {
+              position: 'bottom',
+              labels: {
+                boxWidth: 12,
+                font: {
+                  size: 10
+                }
+              }
+            }
+          }
+        }
+      });
+    });
+  </script>
+  
+  <!-- Hidden elements with data attributes for scores -->
+  {% for result in results %}
+    <span data-score="{{ result.score }}" style="display: none;"></span>
+  {% endfor %}
   {% endif %}
-
-  <p><a href="{{ url_for('index') }}">← Back to URL submission</a></p>
 </body>
 </html>

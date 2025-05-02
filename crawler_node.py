@@ -9,192 +9,280 @@ from dotenv import load_dotenv
 import json
 import urllib3
 import warnings
+from datetime import datetime
 
-# Suppress warnings
+# ─── Suppress SSL warnings (for testing only) ───────────────────────────
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 warnings.filterwarnings('ignore')
 
-# Load environment variables
+# ─── Load environment variables ─────────────────────────────────────────
 load_dotenv()
+AWS_REGION     = os.getenv('AWS_REGION', 'eu-north-1')
+SQS_QUEUE_URL  = os.getenv('SQS_QUEUE_URL')       # for content → indexer
+SQS_URLS_QUEUE = os.getenv('SQS_URLS_QUEUE')      # for new URLs → crawler
+S3_BUCKET      = os.getenv('S3_BUCKET')           # your S3 bucket name
 
-# Configure logging
+# ─── Configure logging ──────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger('Crawler')
 
-# AWS Configuration
-AWS_REGION = os.getenv('AWS_REGION', 'eu-north-1')
-SQS_QUEUE_URL = os.getenv('SQS_QUEUE_URL')
-SQS_URLS_QUEUE = os.getenv('SQS_URLS_QUEUE')  # Queue for URLs to crawl
-logger.info(f"Using SQS Queue URL: {SQS_QUEUE_URL}")
-logger.info(f"Using AWS Region: {AWS_REGION}")
+# ─── AWS clients ────────────────────────────────────────────────────────
 sqs_client = boto3.client('sqs', region_name=AWS_REGION)
+s3_client  = boto3.client('s3', region_name=AWS_REGION)
 
 class Crawler:
     def __init__(self):
         self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) '
+                'Chrome/91.0.4472.124 Safari/537.36'
+            )
         }
-        self.crawl_delay = 1  # Reduced delay for testing
+        self.crawl_delay = 1  # seconds between requests
         self.visited_urls = set()
+        self.crawled_count = 0  # Track how many URLs we've successfully crawled
+        self.stats_update_interval = 5  # Update stats every N successful crawls
         self.session = requests.Session()
-        self.session.verify = False  # Disable SSL verification
+        self.session.verify = False  # disable SSL verify (testing only)
         self.session.headers.update(self.headers)
-        self.session.timeout = 10  # Set timeout for all requests
+        self.session.timeout = 10   # seconds
+        
+        # Try to load existing crawled count
+        self._load_stats_from_s3()
 
-    def fetch_page(self, url):
+    def _load_stats_from_s3(self):
+        """Load existing stats from S3"""
         try:
-            logger.info(f"Attempting to fetch {url}")
-            response = self.session.get(url)
-            response.raise_for_status()
-            logger.info(f"Successfully fetched {url}")
-            return response.text
+            response = s3_client.get_object(
+                Bucket=S3_BUCKET,
+                Key='stats/crawled_count.json'
+            )
+            stats = json.loads(response['Body'].read().decode('utf-8'))
+            self.crawled_count = stats.get('count', 0)
+            logger.info(f"Loaded existing crawled count: {self.crawled_count}")
+        except Exception as e:
+            logger.info(f"No existing stats file found, starting from 0: {e}")
+    
+    def _update_stats_in_s3(self):
+        """Update the statistics file in S3"""
+        try:
+            stats = {
+                'count': self.crawled_count,
+                'updated_at': datetime.now().isoformat()
+            }
+            s3_client.put_object(
+                Bucket=S3_BUCKET,
+                Key='stats/crawled_count.json',
+                Body=json.dumps(stats).encode('utf-8'),
+                ContentType='application/json'
+            )
+            logger.info(f"Updated crawled count stats in S3: {self.crawled_count}")
+        except Exception as e:
+            logger.error(f"Error updating stats in S3: {e}")
+
+    def fetch_page(self, url: str) -> str | None:
+        try:
+            logger.info(f"Fetching: {url}")
+            resp = self.session.get(url)
+            resp.raise_for_status()
+            return resp.text
         except requests.RequestException as e:
-            logger.error(f"Error fetching {url}: {str(e)}")
-            return None
-        except Exception as e:
-            logger.error(f"Unexpected error fetching {url}: {str(e)}")
+            logger.error(f"Fetch error for {url}: {e}")
             return None
 
-    def extract_urls(self, html, base_url):
-        if not html:
-            return []
-        
-        try:
-            soup = BeautifulSoup(html, 'html.parser')
-            urls = []
-            
-            for link in soup.find_all('a', href=True):
-                href = link['href']
-                absolute_url = urljoin(base_url, href)
-                if self.is_valid_url(absolute_url) and absolute_url not in self.visited_urls:
-                    urls.append(absolute_url)
-            
-            logger.info(f"Extracted {len(urls)} new URLs from {base_url}")
-            return urls[:10]  # Limit to 10 URLs per page to prevent overwhelming
-        except Exception as e:
-            logger.error(f"Error extracting URLs from {base_url}: {str(e)}")
-            return []
+    def extract_urls(self, html: str, base_url: str) -> list[str]:
+        soup = BeautifulSoup(html, 'html.parser')
+        found = []
+        for a in soup.find_all('a', href=True):
+            absolute = urljoin(base_url, a['href'])
+            if self.is_valid_url(absolute) and absolute not in self.visited_urls:
+                found.append(absolute)
+        logger.info(f" → {len(found)} URLs extracted from {base_url}")
+        return found[:10]
 
-    def extract_text(self, html):
-        if not html:
-            return ""
-        
-        try:
-            soup = BeautifulSoup(html, 'html.parser')
-            # Remove script and style elements
-            for element in soup(["script", "style", "nav", "header", "footer"]):
-                element.decompose()
-            
-            text = soup.get_text(separator=' ', strip=True)
-            # Basic text cleaning
-            text = ' '.join(text.split())
-            logger.info(f"Extracted {len(text)} characters of text")
-            return text
-        except Exception as e:
-            logger.error(f"Error extracting text: {str(e)}")
-            return ""
+    def extract_text(self, html: str) -> str:
+        soup = BeautifulSoup(html, 'html.parser')
+        for tag in soup(['script', 'style', 'nav', 'header', 'footer']):
+            tag.decompose()
+        text = soup.get_text(separator=' ', strip=True)
+        return ' '.join(text.split())
 
-    def is_valid_url(self, url):
-        try:
-            parsed = urlparse(url)
-            return all([parsed.scheme, parsed.netloc]) and parsed.scheme in ['http', 'https']
-        except Exception:
-            return False
+    def is_valid_url(self, url: str) -> bool:
+        p = urlparse(url)
+        return bool(p.scheme in ('http', 'https') and p.netloc)
 
-    def process_url(self, url):
+    def process_url(self, url: str, receipt_handle: str):
         if url in self.visited_urls:
-            logger.info(f"Already visited {url}, skipping")
+            logger.info(f"Skipping (visited): {url}")
+            # Delete the message to keep it from reappearing in the queue
+            try:
+                sqs_client.delete_message(
+                    QueueUrl=SQS_URLS_QUEUE,
+                    ReceiptHandle=receipt_handle
+                )
+                logger.info(f"Deleted previously visited URL from queue: {url}")
+            except Exception as e:
+                logger.error(f"Error deleting message for {url}: {e}")
             return
-
-        logger.info(f"Processing URL: {url}")
+            
         self.visited_urls.add(url)
         
-        # Fetch and parse the page
+        # Update visibility timeout to keep this URL marked as "In Progress"
+        try:
+            sqs_client.change_message_visibility(
+                QueueUrl=SQS_URLS_QUEUE,
+                ReceiptHandle=receipt_handle,
+                VisibilityTimeout=60  # Extend visibility timeout while processing
+            )
+            logger.info(f"Extended visibility timeout for: {url}")
+        except Exception as e:
+            logger.error(f"Failed to extend visibility timeout: {e}")
+
         html = self.fetch_page(url)
-        if html:
-            # Extract URLs and text content
-            extracted_urls = self.extract_urls(html, url)
-            extracted_text = self.extract_text(html)
+        if not html:
+            # Delete the message even if we couldn't fetch it to avoid retries
+            try:
+                sqs_client.delete_message(
+                    QueueUrl=SQS_URLS_QUEUE,
+                    ReceiptHandle=receipt_handle
+                )
+                logger.info(f"Deleted unfetchable URL from queue: {url}")
+            except Exception as e:
+                logger.error(f"Error deleting message for {url}: {e}")
+            return
+
+        # ─── Store raw HTML in S3 ─────────────────────────────────────
+        parsed = urlparse(url)
+        key_base = (parsed.netloc + parsed.path).strip('/')
+        key_base = key_base.replace('/', '_') or parsed.netloc
+
+        try:
+            s3_client.put_object(
+                Bucket=S3_BUCKET,
+                Key=f'raw/{key_base}.html',
+                Body=html.encode('utf-8'),
+                ContentType='text/html'
+            )
+            logger.info(f"Uploaded raw HTML to s3://{S3_BUCKET}/raw/{key_base}.html")
+        except Exception as e:
+            logger.error(f"S3 upload (raw) failed for {url}: {e}")
+
+        # ─── Extract & store cleaned text in S3 ────────────────────────
+        text = self.extract_text(html)
+        if text:
+            try:
+                s3_client.put_object(
+                    Bucket=S3_BUCKET,
+                    Key=f'text/{key_base}.txt',
+                    Body=text.encode('utf-8'),
+                    ContentType='text/plain'
+                )
+                logger.info(f"Uploaded text to s3://{S3_BUCKET}/text/{key_base}.txt")
+                
+                # Increment crawled count
+                self.crawled_count += 1
+                
+                # Update stats periodically
+                if self.crawled_count % self.stats_update_interval == 0:
+                    self._update_stats_in_s3()
+                    
+            except Exception as e:
+                logger.error(f"S3 upload (text) failed for {url}: {e}")
+
+        # ─── Send newly discovered URLs back into the crawl queue ───────
+        for new_url in self.extract_urls(html, url):
+            try:
+                sqs_client.send_message(
+                    QueueUrl=SQS_URLS_QUEUE,
+                    MessageBody=json.dumps({'url': new_url})
+                )
+                logger.info(f"Enqueued new URL: {new_url}")
+            except Exception as e:
+                logger.error(f"Error enqueuing URL {new_url}: {e}")
+
+        # ─── Send this page's content snippet to the indexer queue ─────
+        snippet = text[:1000]
+        try:
+            sqs_client.send_message(
+                QueueUrl=SQS_QUEUE_URL,
+                MessageBody=json.dumps({'url': url, 'content': snippet})
+            )
+            logger.info(f"Sent content snippet for indexing: {url}")
+        except Exception as e:
+            logger.error(f"Error sending content for {url}: {e}")
             
-            if extracted_text:
-                # Send extracted URLs to the URLs queue
-                for new_url in extracted_urls:
-                    try:
-                        sqs_client.send_message(
-                            QueueUrl=SQS_URLS_QUEUE,
-                            MessageBody=json.dumps({'url': new_url})
-                        )
-                        logger.info(f"Sent new URL to queue: {new_url}")
-                    except Exception as e:
-                        logger.error(f"Error sending URL to queue: {str(e)}")
-                
-                # Send content to indexer queue
-                message_body = {
-                    'url': url,
-                    'content': extracted_text[:1000],  # Limit content size
-                }
-                
-                try:
-                    sqs_client.send_message(
-                        QueueUrl=SQS_QUEUE_URL,
-                        MessageBody=json.dumps(message_body)
-                    )
-                    logger.info(f"Sent content to SQS for {url}")
-                except Exception as e:
-                    logger.error(f"Error sending to SQS: {str(e)}")
+        # ─── Delete the message after successful processing ───────────
+        try:
+            sqs_client.delete_message(
+                QueueUrl=SQS_URLS_QUEUE,
+                ReceiptHandle=receipt_handle
+            )
+            logger.info(f"Successfully processed and deleted message for: {url}")
+        except Exception as e:
+            logger.error(f"Error deleting message for {url}: {e}")
 
 def crawler_process():
-    logger.info("Crawler node started")
+    logger.info("Crawler started")
     crawler = Crawler()
-    
+
     while True:
         try:
-            # Receive URL from SQS
-            response = sqs_client.receive_message(
+            # Lower VisibilityTimeout to 30 seconds so URLs show as "In Progress"
+            # for a reasonable time in the dashboard
+            resp = sqs_client.receive_message(
                 QueueUrl=SQS_URLS_QUEUE,
                 MaxNumberOfMessages=1,
-                WaitTimeSeconds=20,
+                WaitTimeSeconds=10,
                 VisibilityTimeout=30
             )
-
-            if 'Messages' in response:
-                for message in response['Messages']:
-                    try:
-                        body = json.loads(message['Body'])
-                        url = body['url']
-                        
-                        # Process the URL
-                        crawler.process_url(url)
-                        
-                        # Delete the message from the queue
-                        sqs_client.delete_message(
-                            QueueUrl=SQS_URLS_QUEUE,
-                            ReceiptHandle=message['ReceiptHandle']
-                        )
-                        
-                    except json.JSONDecodeError as e:
-                        logger.error(f"Error decoding message: {str(e)}")
-                    except Exception as e:
-                        logger.error(f"Error processing message: {str(e)}")
-                    
-                    # Always try to delete the message
-                    try:
-                        sqs_client.delete_message(
-                            QueueUrl=SQS_URLS_QUEUE,
-                            ReceiptHandle=message['ReceiptHandle']
-                        )
-                    except Exception as e:
-                        logger.error(f"Error deleting message: {str(e)}")
             
-            # Implement crawl delay
+            messages = resp.get('Messages', [])
+            
+            if not messages:
+                logger.info("No messages in queue, waiting...")
+                time.sleep(5)
+                continue
+                
+            for msg in messages:
+                try:
+                    body = json.loads(msg['Body'])
+                    url = body.get('url')
+                    if url:
+                        logger.info(f"Processing URL: {url}")
+                        crawler.process_url(url, msg['ReceiptHandle'])
+                    else:
+                        logger.error(f"Invalid message format, no URL found: {body}")
+                        # Delete malformed message
+                        sqs_client.delete_message(
+                            QueueUrl=SQS_URLS_QUEUE,
+                            ReceiptHandle=msg['ReceiptHandle']
+                        )
+                except json.JSONDecodeError as e:
+                    logger.error(f"Invalid JSON in message: {e}")
+                    # Delete invalid message
+                    sqs_client.delete_message(
+                        QueueUrl=SQS_URLS_QUEUE,
+                        ReceiptHandle=msg['ReceiptHandle']
+                    )
+                except Exception as e:
+                    logger.error(f"Error processing message: {e}")
+                    
+            # Wait between polling to avoid excessive API calls
             time.sleep(crawler.crawl_delay)
             
         except Exception as e:
-            logger.error(f"Error in crawler process: {str(e)}")
-            time.sleep(5)  # Wait before retrying
+            logger.error(f"Error in crawler loop: {e}")
+            time.sleep(5)
+        
+        # Update stats before exit
+        except KeyboardInterrupt:
+            logger.info("Crawler shutting down, updating stats...")
+            crawler._update_stats_in_s3()
+            break
 
 if __name__ == '__main__':
-    crawler_process()    
+    crawler_process()
