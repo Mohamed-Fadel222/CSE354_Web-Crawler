@@ -7,6 +7,8 @@ from whoosh.fields import Schema, TEXT, ID
 from whoosh.qparser import QueryParser
 import json
 import time
+import tempfile
+import shutil
 
 # Load environment variables
 load_dotenv()
@@ -18,9 +20,14 @@ logger = logging.getLogger('Indexer')
 # AWS Configuration
 AWS_REGION = os.getenv('AWS_REGION', 'eu-north-1')
 SQS_QUEUE_URL = os.getenv('SQS_QUEUE_URL')
+S3_BUCKET_NAME = os.getenv('S3_BUCKET_NAME')
 logger.info(f"Using SQS Queue URL: {SQS_QUEUE_URL}")
 logger.info(f"Using AWS Region: {AWS_REGION}")
+logger.info(f"Using S3 Bucket: {S3_BUCKET_NAME}")
+
+# Initialize AWS clients
 sqs_client = boto3.client('sqs', region_name=AWS_REGION)
+s3_client = boto3.client('s3', region_name=AWS_REGION)
 
 class Indexer:
     def __init__(self):
@@ -28,14 +35,51 @@ class Indexer:
             url=ID(stored=True),
             content=TEXT(stored=True)
         )
-        self.index_dir = "index"
-        if not os.path.exists(self.index_dir):
-            os.mkdir(self.index_dir)
-            self.index = create_in(self.index_dir, self.schema)
-        else:
+        self.temp_dir = tempfile.mkdtemp()
+        self.index_dir = os.path.join(self.temp_dir, "index")
+        os.makedirs(self.index_dir, exist_ok=True)
+        
+        # Try to download existing index from S3
+        try:
+            self._download_index_from_s3()
             self.index = open_dir(self.index_dir)
+            logger.info("Successfully loaded existing index from S3")
+        except Exception as e:
+            logger.info(f"No existing index found in S3 or error loading: {str(e)}")
+            self.index = create_in(self.index_dir, self.schema)
+            logger.info("Created new index")
+        
         self.writer = self.index.writer()
         logger.info("Indexer initialized")
+
+    def _upload_index_to_s3(self):
+        """Upload the entire index directory to S3"""
+        try:
+            for root, dirs, files in os.walk(self.index_dir):
+                for file in files:
+                    local_path = os.path.join(root, file)
+                    s3_path = os.path.relpath(local_path, self.temp_dir)
+                    s3_client.upload_file(local_path, S3_BUCKET_NAME, s3_path)
+            logger.info("Successfully uploaded index to S3")
+        except Exception as e:
+            logger.error(f"Error uploading index to S3: {str(e)}")
+
+    def _download_index_from_s3(self):
+        """Download the entire index from S3"""
+        try:
+            # List all objects in the index directory
+            paginator = s3_client.get_paginator('list_objects_v2')
+            for page in paginator.paginate(Bucket=S3_BUCKET_NAME, Prefix='index/'):
+                if 'Contents' in page:
+                    for obj in page['Contents']:
+                        s3_path = obj['Key']
+                        local_path = os.path.join(self.temp_dir, s3_path)
+                        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                        s3_client.download_file(S3_BUCKET_NAME, s3_path, local_path)
+            logger.info("Successfully downloaded index from S3")
+        except Exception as e:
+            logger.error(f"Error downloading index from S3: {str(e)}")
+            raise
 
     def index_document(self, url, content):
         if not content or not url:
@@ -47,6 +91,9 @@ class Indexer:
             self.writer.commit()
             logger.info(f"Successfully indexed document from {url} ({len(content)} chars)")
             self.writer = self.index.writer()  # Create new writer for next document
+            
+            # Upload updated index to S3
+            self._upload_index_to_s3()
         except Exception as e:
             logger.error(f"Error indexing document from {url}: {str(e)}")
             try:
@@ -54,6 +101,13 @@ class Indexer:
             except:
                 pass
             self.writer = self.index.writer()  # Create new writer after error
+
+    def __del__(self):
+        """Cleanup temporary directory when the indexer is destroyed"""
+        try:
+            shutil.rmtree(self.temp_dir)
+        except Exception as e:
+            logger.error(f"Error cleaning up temporary directory: {str(e)}")
 
     def search(self, query_text):
         try:
