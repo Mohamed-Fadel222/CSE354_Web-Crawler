@@ -22,7 +22,6 @@ logger = logging.getLogger('Indexer')
 # AWS Configuration
 AWS_REGION = os.getenv('AWS_REGION', 'eu-north-1')
 SQS_QUEUE_URL = os.getenv('SQS_QUEUE_URL')
-SQS_DLQ_URL = os.getenv('SQS_DLQ_URL', '')  # Dead Letter Queue
 S3_BUCKET_NAME = os.getenv('S3_BUCKET_NAME')
 MAX_RETRIES = int(os.getenv('MAX_RETRIES', '3'))
 HEALTH_CHECK_INTERVAL = int(os.getenv('HEALTH_CHECK_INTERVAL', '300'))  # 5 minutes
@@ -30,8 +29,6 @@ HEALTH_CHECK_INTERVAL = int(os.getenv('HEALTH_CHECK_INTERVAL', '300'))  # 5 minu
 logger.info(f"Using SQS Queue URL: {SQS_QUEUE_URL}")
 logger.info(f"Using AWS Region: {AWS_REGION}")
 logger.info(f"Using S3 Bucket: {S3_BUCKET_NAME}")
-if SQS_DLQ_URL:
-    logger.info(f"Using Dead Letter Queue: {SQS_DLQ_URL}")
 
 # Initialize AWS clients
 sqs_client = boto3.client('sqs', region_name=AWS_REGION)
@@ -54,6 +51,7 @@ class Indexer:
             "documents_indexed": 0,
             "failed_documents": 0,
             "retried_documents": 0,
+            "message_retries": 0,
             "start_time": datetime.now()
         }
         
@@ -187,6 +185,7 @@ class Indexer:
             "documents_indexed": self.stats["documents_indexed"],
             "failed_documents": self.stats["failed_documents"],
             "retried_documents": self.stats["retried_documents"],
+            "message_retries": self.stats["message_retries"],
             "uptime_seconds": int(uptime),
             "indexing_rate": round(docs_per_minute, 2),
             "last_health_check": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.last_health_check))
@@ -211,150 +210,171 @@ class Indexer:
                 AttributeNames=['ApproximateNumberOfMessages']
             )
             
+            # Monitor queue health
+            self.monitor_queue_health()
+            
             logger.info("Health check: All services operational")
             return True
         except Exception as e:
             logger.error(f"Health check failed: {str(e)}")
             return False
 
-    def send_to_dlq(self, message, error):
-        """Send failed message to Dead Letter Queue"""
-        if not SQS_DLQ_URL:
-            logger.warning("No Dead Letter Queue configured, dropping failed message")
-            return False
-            
+    def monitor_queue_health(self):
+        """Monitor queue for signs of processing issues"""
         try:
-            # Add error information to the message
+            # Check content queue
+            content_response = sqs_client.get_queue_attributes(
+                QueueUrl=SQS_QUEUE_URL,
+                AttributeNames=['ApproximateNumberOfMessages', 'ApproximateNumberOfMessagesNotVisible']
+            )
+            
+            # Calculate health ratio
+            content_visible = int(content_response['Attributes']['ApproximateNumberOfMessages'])
+            content_in_flight = int(content_response['Attributes']['ApproximateNumberOfMessagesNotVisible'])
+            
+            # Check for high in-flight ratio which might indicate stuck processing
+            if content_visible + content_in_flight > 0:
+                content_health_ratio = content_in_flight / (content_visible + content_in_flight)
+                if content_health_ratio > 0.8:  # More than 80% of messages are in-flight
+                    logger.warning(f"Content queue health warning: {content_in_flight} in-flight vs {content_visible} visible messages")
+            
+            return True
+        except Exception as e:
+            logger.error(f"Error monitoring queue health: {str(e)}")
+            return False
+
+    def handle_failed_message(self, message, error):
+        """Process failed messages by marking and reinserting"""
+        try:
+            # Parse the original message
             if isinstance(message['Body'], str):
                 body = json.loads(message['Body'])
             else:
                 body = message['Body']
                 
-            dlq_message = {
-                "original_message": body,
-                "error": str(error),
-                "timestamp": datetime.now().isoformat(),
-                "message_type": body.get('message_type', 'UNKNOWN')
-            }
+            # Add error information and retry count
+            if 'error_count' not in body:
+                body['error_count'] = 1
+            else:
+                body['error_count'] += 1
+                
+            body['last_error'] = str(error)
+            body['last_retry'] = datetime.now().isoformat()
             
-            sqs_client.send_message(
-                QueueUrl=SQS_DLQ_URL,
-                MessageBody=json.dumps(dlq_message)
-            )
-            logger.info(f"Sent failed message to DLQ: {body.get('url', 'unknown URL')}")
-            return True
+            # If max retries not exceeded, send back to original queue
+            if body['error_count'] <= MAX_RETRIES:
+                delay_seconds = min(body['error_count'] * 60, 900)  # Backoff with delay, max 15 minutes
+                
+                sqs_client.send_message(
+                    QueueUrl=SQS_QUEUE_URL,
+                    MessageBody=json.dumps(body),
+                    DelaySeconds=delay_seconds
+                )
+                logger.info(f"Requeued message for retry {body['error_count']}/{MAX_RETRIES} with delay {delay_seconds}s")
+                self.stats["message_retries"] += 1
+                return True
+            else:
+                logger.error(f"Message failed after {MAX_RETRIES} retries, dropping: {body}")
+                return False
         except Exception as e:
-            logger.error(f"Error sending to DLQ: {str(e)}")
+            logger.error(f"Error handling failed message: {str(e)}")
             return False
 
     def process_sqs_message(self, message):
         try:
+            # Parse the message body
             body = json.loads(message['Body'])
-            url = body['url']
-            content = body['content']
             
-            # Handle message type tag
-            msg_type = body.get('message_type', 'CONTENT')
+            # Check if this is a retry and log accordingly
+            if body.get('error_count', 0) > 0:
+                logger.info(f"Processing retry {body['error_count']}/{MAX_RETRIES} for {body.get('url', 'unknown')}")
             
-            logger.info(f"Processing {msg_type} content from {url}")
+            # Extract content and URL
+            url = body.get('url')
+            content = body.get('content')
+            title = body.get('title', '')
             
-            # Successful indexing
-            if self.index_document(url, content, msg_type):
-                # Delete the message from the queue
-                sqs_client.delete_message(
-                    QueueUrl=SQS_QUEUE_URL,
-                    ReceiptHandle=message['ReceiptHandle']
-                )
-                logger.info(f"Successfully processed and deleted message for {url}")
-                return True
+            if url and content:
+                # Add title to content for better searchability
+                if title:
+                    full_content = f"{title}\n\n{content}"
+                else:
+                    full_content = content
+                    
+                # Index the document
+                msg_type = body.get('message_type', 'CONTENT')
+                if self.index_document(url, full_content, msg_type):
+                    logger.info(f"Successfully processed message for {url}")
+                    return True
+                else:
+                    logger.error(f"Failed to index document for {url}")
+                    return False
             else:
-                # Failed to index, send to DLQ
-                self.send_to_dlq(message, "Failed to index document")
-                
-                # Still delete from main queue
-                sqs_client.delete_message(
-                    QueueUrl=SQS_QUEUE_URL,
-                    ReceiptHandle=message['ReceiptHandle']
-                )
+                logger.warning(f"Message missing URL or content: {body}")
                 return False
-            
+                
         except json.JSONDecodeError as e:
             logger.error(f"Error decoding message: {str(e)}")
-            logger.error(f"Raw message body: {message.get('Body', 'No body')}")
-            self.send_to_dlq(message, f"JSON decode error: {str(e)}")
-        except KeyError as e:
-            logger.error(f"Missing key in message: {str(e)}")
-            logger.error(f"Message body: {message.get('Body', 'No body')}")
-            self.send_to_dlq(message, f"Missing key: {str(e)}")
+            return False
         except Exception as e:
             logger.error(f"Error processing message: {str(e)}")
-            self.send_to_dlq(message, f"General error: {str(e)}")
-        
-        # Always try to delete the message to prevent reprocessing
-        try:
-            sqs_client.delete_message(
-                QueueUrl=SQS_QUEUE_URL,
-                ReceiptHandle=message['ReceiptHandle']
-            )
-        except Exception as e:
-            logger.error(f"Error deleting message: {str(e)}")
             return False
-        
-        return False
 
     def indexer_loop(self):
-        consecutive_empty = 0
+        """Main indexer loop"""
+        logger.info("Starting indexer loop")
         
         while True:
             try:
-                # Periodic health check
+                # Poll for messages from the SQS queue with long polling
+                response = sqs_client.receive_message(
+                    QueueUrl=SQS_QUEUE_URL,
+                    AttributeNames=['All'],
+                    MaxNumberOfMessages=1,
+                    WaitTimeSeconds=20
+                )
+                
+                if 'Messages' in response:
+                    message = response['Messages'][0]
+                    receipt_handle = message['ReceiptHandle']
+                    
+                    try:
+                        success = self.process_sqs_message(message)
+                        if success:
+                            # Delete message from queue only on success
+                            sqs_client.delete_message(
+                                QueueUrl=SQS_QUEUE_URL,
+                                ReceiptHandle=receipt_handle
+                            )
+                        else:
+                            # Handle the failure case
+                            self.handle_failed_message(message, "Failed to process message")
+                            
+                    except Exception as e:
+                        logger.error(f"Error processing message: {str(e)}")
+                        # Handle the exception
+                        self.handle_failed_message(message, str(e))
+                else:
+                    logger.info("No messages in queue, waiting...")
+                    time.sleep(5)
+                    
+                # Perform health check periodically
                 if time.time() - self.last_health_check > HEALTH_CHECK_INTERVAL:
                     self.health_check()
                 
-                # Receive messages from SQS with backoff for empty responses
-                wait_time = 20  # Default long polling
-                if consecutive_empty > 5:
-                    wait_time = min(20, consecutive_empty)  # Increase wait time when queue is empty
-                
-                response = sqs_client.receive_message(
-                    QueueUrl=SQS_QUEUE_URL,
-                    MaxNumberOfMessages=10,
-                    WaitTimeSeconds=wait_time,
-                    VisibilityTimeout=30
-                )
-
-                if 'Messages' in response:
-                    consecutive_empty = 0
-                    for message in response['Messages']:
-                        self.process_sqs_message(message)
-                else:
-                    consecutive_empty += 1
-                    if consecutive_empty % 10 == 0:
-                        logger.info(f"No messages received for {consecutive_empty} consecutive polls")
-                        
-                        # During idle time, upload index if there are pending changes
-                        if self.stats["documents_indexed"] > 0:
-                            self._upload_index_to_s3()
-                            
-                    # Add some jitter to prevent thundering herd when multiple indexers start
-                    time.sleep(random.uniform(1, 3))
-
             except Exception as e:
                 logger.error(f"Error in indexer loop: {str(e)}")
-                time.sleep(5)  # Wait before retrying
+                time.sleep(5)
 
 def indexer_process():
     logger.info("Indexer node started")
     indexer = Indexer()
     
-    # Log current stats on startup
-    logger.info(f"Initial indexer stats: {indexer.get_stats()}")
-    
     # Initial health check
     indexer.health_check()
     
-    # Main processing loop
+    # Start the main indexer loop
     indexer.indexer_loop()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     indexer_process() 

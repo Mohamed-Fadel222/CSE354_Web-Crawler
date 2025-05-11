@@ -30,15 +30,12 @@ logger = logging.getLogger('Crawler')
 AWS_REGION = os.getenv('AWS_REGION', 'eu-north-1')
 SQS_QUEUE_URL = os.getenv('SQS_QUEUE_URL')
 SQS_URLS_QUEUE = os.getenv('SQS_URLS_QUEUE')  # Queue for URLs to crawl
-SQS_DLQ_URL = os.getenv('SQS_DLQ_URL', '')  # Dead Letter Queue
 MAX_RETRIES = int(os.getenv('MAX_RETRIES', '3'))
 HEALTH_CHECK_INTERVAL = int(os.getenv('HEALTH_CHECK_INTERVAL', '300'))  # 5 minutes
 
 logger.info(f"Using SQS Queue URL: {SQS_QUEUE_URL}")
 logger.info(f"Using SQS URLs Queue: {SQS_URLS_QUEUE}")
 logger.info(f"Using AWS Region: {AWS_REGION}")
-if SQS_DLQ_URL:
-    logger.info(f"Using Dead Letter Queue: {SQS_DLQ_URL}")
 
 sqs_client = boto3.client('sqs', region_name=AWS_REGION)
 
@@ -59,6 +56,7 @@ class Crawler:
             "pages_crawled": 0,
             "failed_crawls": 0,
             "urls_extracted": 0,
+            "message_retries": 0,
             "start_time": datetime.now()
         }
 
@@ -149,6 +147,7 @@ class Crawler:
             "pages_crawled": self.stats["pages_crawled"],
             "failed_crawls": self.stats["failed_crawls"],
             "urls_extracted": self.stats["urls_extracted"],
+            "message_retries": self.stats["message_retries"],
             "uptime_seconds": int(uptime),
             "crawl_rate": round(pages_per_minute, 2),
             "last_health_check": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.last_health_check))
@@ -175,49 +174,102 @@ class Crawler:
             response = self.session.get(test_url, timeout=5)
             response.raise_for_status()
             
+            # Monitor queue health
+            self.monitor_queue_health()
+            
             logger.info("Health check: All services operational")
             return True
         except Exception as e:
             logger.error(f"Health check failed: {str(e)}")
             return False
 
-    def send_to_dlq(self, message, error):
-        """Send failed message to Dead Letter Queue"""
-        if not SQS_DLQ_URL:
-            logger.warning("No Dead Letter Queue configured, dropping failed message")
-            return False
-            
+    def handle_failed_message(self, message, error):
+        """Process failed messages by marking and reinserting"""
         try:
-            # Add error information to the message
+            # Parse the original message
             if isinstance(message['Body'], str):
                 body = json.loads(message['Body'])
             else:
                 body = message['Body']
                 
-            dlq_message = {
-                "original_message": body,
-                "error": str(error),
-                "timestamp": datetime.now().isoformat(),
-                "message_type": "URL_PROCESSING_FAILED"
-            }
+            # Add error information and retry count
+            if 'error_count' not in body:
+                body['error_count'] = 1
+            else:
+                body['error_count'] += 1
+                
+            body['last_error'] = str(error)
+            body['last_retry'] = datetime.now().isoformat()
             
-            sqs_client.send_message(
-                QueueUrl=SQS_DLQ_URL,
-                MessageBody=json.dumps(dlq_message)
-            )
-            logger.info(f"Sent failed message to DLQ: {body.get('url', 'unknown URL')}")
-            return True
+            # If max retries not exceeded, send back to original queue
+            if body['error_count'] <= MAX_RETRIES:
+                target_queue = SQS_URLS_QUEUE if body.get('message_type') == 'URL_TO_CRAWL' else SQS_QUEUE_URL
+                delay_seconds = min(body['error_count'] * 60, 900)  # Backoff with delay, max 15 minutes
+                
+                sqs_client.send_message(
+                    QueueUrl=target_queue,
+                    MessageBody=json.dumps(body),
+                    DelaySeconds=delay_seconds
+                )
+                logger.info(f"Requeued message for retry {body['error_count']}/{MAX_RETRIES} with delay {delay_seconds}s")
+                self.stats["message_retries"] += 1
+                return True
+            else:
+                logger.error(f"Message failed after {MAX_RETRIES} retries, dropping: {body}")
+                return False
         except Exception as e:
-            logger.error(f"Error sending to DLQ: {str(e)}")
+            logger.error(f"Error handling failed message: {str(e)}")
             return False
 
-    def process_url(self, url):
+    def monitor_queue_health(self):
+        """Monitor queue for signs of processing issues"""
+        try:
+            # Check URLs queue
+            url_response = sqs_client.get_queue_attributes(
+                QueueUrl=SQS_URLS_QUEUE,
+                AttributeNames=['ApproximateNumberOfMessages', 'ApproximateNumberOfMessagesNotVisible']
+            )
+            
+            # Check content queue
+            content_response = sqs_client.get_queue_attributes(
+                QueueUrl=SQS_QUEUE_URL,
+                AttributeNames=['ApproximateNumberOfMessages', 'ApproximateNumberOfMessagesNotVisible']
+            )
+            
+            # Calculate health ratios
+            url_visible = int(url_response['Attributes']['ApproximateNumberOfMessages'])
+            url_in_flight = int(url_response['Attributes']['ApproximateNumberOfMessagesNotVisible'])
+            
+            content_visible = int(content_response['Attributes']['ApproximateNumberOfMessages'])
+            content_in_flight = int(content_response['Attributes']['ApproximateNumberOfMessagesNotVisible'])
+            
+            # Check for high in-flight ratio which might indicate stuck processing
+            if url_visible + url_in_flight > 0:
+                url_health_ratio = url_in_flight / (url_visible + url_in_flight)
+                if url_health_ratio > 0.8:  # More than 80% of messages are in-flight
+                    logger.warning(f"URL queue health warning: {url_in_flight} in-flight vs {url_visible} visible messages")
+            
+            if content_visible + content_in_flight > 0:
+                content_health_ratio = content_in_flight / (content_visible + content_in_flight)
+                if content_health_ratio > 0.8:  # More than 80% of messages are in-flight
+                    logger.warning(f"Content queue health warning: {content_in_flight} in-flight vs {content_visible} visible messages")
+            
+            return True
+        except Exception as e:
+            logger.error(f"Error monitoring queue health: {str(e)}")
+            return False
+
+    def process_url(self, url, message_body=None):
         if url in self.visited_urls:
             logger.info(f"Already visited {url}, skipping")
             return True
 
         logger.info(f"Processing URL: {url}")
         self.visited_urls.add(url)
+        
+        # Handle retries if this is a retry message
+        if message_body and message_body.get('error_count', 0) > 0:
+            logger.info(f"Processing retry {message_body['error_count']}/{MAX_RETRIES} for {url}")
         
         # Fetch and parse the page
         html = self.fetch_page(url)
@@ -249,121 +301,85 @@ class Crawler:
                     'content': extracted_text[:1000],  # Limit content size
                     'title': title[:200] if title else "",  # Add title information
                     'message_type': 'CONTENT_TO_INDEX',
-                    'crawl_timestamp': datetime.now().isoformat(),
-                    'extracted_urls_count': len(extracted_urls)
+                    'timestamp': datetime.now().isoformat()
                 }
                 
-                retry_count = 0
-                while retry_count < MAX_RETRIES:
-                    try:
-                        sqs_client.send_message(
-                            QueueUrl=SQS_QUEUE_URL,
-                            MessageBody=json.dumps(message_body)
-                        )
-                        logger.info(f"Sent content to SQS for {url}")
-                        return True
-                    except Exception as e:
-                        retry_count += 1
-                        if retry_count >= MAX_RETRIES:
-                            logger.error(f"Failed to send content to SQS after {MAX_RETRIES} attempts: {str(e)}")
-                            return False
-                        
-                        backoff_time = self.retry_backoff[min(retry_count-1, len(self.retry_backoff)-1)]
-                        logger.warning(f"Error sending to SQS, retry {retry_count}/{MAX_RETRIES} in {backoff_time}s: {str(e)}")
-                        time.sleep(backoff_time)
-            else:
-                logger.warning(f"No text content extracted from {url}")
-                return False
-        else:
-            logger.error(f"Failed to fetch content from {url}")
-            return False
+                try:
+                    sqs_client.send_message(
+                        QueueUrl=SQS_QUEUE_URL,
+                        MessageBody=json.dumps(message_body)
+                    )
+                    logger.info(f"Sent content to indexer queue: {url}")
+                    return True
+                except Exception as e:
+                    logger.error(f"Error sending content to indexer queue: {str(e)}")
+                    return False
+        return False
 
+# Main crawler loop
 def crawler_process():
     logger.info("Crawler node started")
     crawler = Crawler()
     
-    # Log initial stats
-    logger.info(f"Initial crawler stats: {crawler.get_stats()}")
-    
     # Initial health check
     crawler.health_check()
     
-    consecutive_empty = 0
+    last_health_check = time.time()
     
     while True:
         try:
-            # Periodic health check
-            if time.time() - crawler.last_health_check > HEALTH_CHECK_INTERVAL:
+            # Perform health check periodically
+            if time.time() - last_health_check > HEALTH_CHECK_INTERVAL:
                 crawler.health_check()
+                last_health_check = time.time()
             
-            # Receive URL from SQS with adaptive wait time
-            wait_time = 20  # Default long polling
-            if consecutive_empty > 5:
-                wait_time = min(20, consecutive_empty)  # Increase wait time when queue is empty
-                
+            # Poll for messages from the URL queue with long polling
             response = sqs_client.receive_message(
                 QueueUrl=SQS_URLS_QUEUE,
+                AttributeNames=['All'],
                 MaxNumberOfMessages=1,
-                WaitTimeSeconds=wait_time,
-                VisibilityTimeout=30
+                WaitTimeSeconds=20
             )
-
+            
             if 'Messages' in response:
-                consecutive_empty = 0
-                for message in response['Messages']:
-                    try:
-                        body = json.loads(message['Body'])
-                        url = body['url']
-                        
-                        # Process the URL
-                        if crawler.process_url(url):
-                            # Success - delete the message
+                message = response['Messages'][0]
+                receipt_handle = message['ReceiptHandle']
+                
+                try:
+                    # Process the message
+                    body = json.loads(message['Body'])
+                    url = body.get('url')
+                    
+                    if url:
+                        success = crawler.process_url(url, body)
+                        if success:
+                            # Delete message from queue only on success
                             sqs_client.delete_message(
                                 QueueUrl=SQS_URLS_QUEUE,
-                                ReceiptHandle=message['ReceiptHandle']
+                                ReceiptHandle=receipt_handle
                             )
                         else:
-                            # Processing failed, send to DLQ
-                            crawler.send_to_dlq(message, "URL processing failed")
-                            
-                            # Still delete from main queue
-                            sqs_client.delete_message(
-                                QueueUrl=SQS_URLS_QUEUE,
-                                ReceiptHandle=message['ReceiptHandle']
-                            )
-                        
-                    except json.JSONDecodeError as e:
-                        logger.error(f"Error decoding message: {str(e)}")
-                        crawler.send_to_dlq(message, f"JSON decode error: {str(e)}")
-                    except KeyError as e:
-                        logger.error(f"Missing key in message: {str(e)}")
-                        crawler.send_to_dlq(message, f"Missing key: {str(e)}")
-                    except Exception as e:
-                        logger.error(f"Error processing message: {str(e)}")
-                        crawler.send_to_dlq(message, f"General error: {str(e)}")
-                    
-                    # Always try to delete the message even if processing failed
-                    try:
+                            # Handle the failure case
+                            crawler.handle_failed_message(message, "Failed to process URL")
+                    else:
+                        logger.warning("Received message without URL")
+                        # Delete malformed message
                         sqs_client.delete_message(
                             QueueUrl=SQS_URLS_QUEUE,
-                            ReceiptHandle=message['ReceiptHandle']
+                            ReceiptHandle=receipt_handle
                         )
-                    except Exception as e:
-                        logger.error(f"Error deleting message: {str(e)}")
+                        
+                except Exception as e:
+                    logger.error(f"Error processing message: {str(e)}")
+                    # Handle the exception
+                    crawler.handle_failed_message(message, str(e))
             else:
-                consecutive_empty += 1
-                if consecutive_empty % 10 == 0:
-                    logger.info(f"No messages received for {consecutive_empty} consecutive polls")
-                # Add some jitter to prevent thundering herd with multiple crawlers
-                time.sleep(random.uniform(0.5, crawler.crawl_delay * 1.5))
-                continue
-            
-            # Add normal crawl delay
-            time.sleep(crawler.crawl_delay)
-            
+                logger.info("No messages in queue, sleeping...")
+                time.sleep(5)
+                
         except Exception as e:
             logger.error(f"Error in crawler process: {str(e)}")
-            time.sleep(5)  # Wait before retrying
+            time.sleep(5)
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     crawler_process()    

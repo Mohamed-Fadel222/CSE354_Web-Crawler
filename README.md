@@ -2,6 +2,16 @@
 
 A distributed web crawler system implemented using MPI and AWS services.
 
+## Features
+
+- **Distributed Web Crawling**: Multi-node architecture with master, crawler, and indexer nodes
+- **Task Queue**: AWS SQS for distributed task management
+- **Content Indexing**: Whoosh for full-text search capabilities
+- **Error Handling**: Comprehensive fault tolerance with message metadata and retries
+- **Health Monitoring**: System-wide health checks and monitoring
+- **Scalability**: Horizontally scalable architecture
+- **Cloud-Ready**: Designed for cloud deployment with AWS services
+
 ## Prerequisites
 
 - Python 3.8+
@@ -16,88 +26,117 @@ A distributed web crawler system implemented using MPI and AWS services.
 pip install -r requirements.txt
 ```
 
-2. Create an SQS queue in AWS and note its URL.
+2. Create AWS SQS queues:
+   - Create a queue for crawl URLs (e.g., web-crawler-urls-queue)
+   - Create a queue for content indexing (e.g., web-crawler-content-queue)
+   - Configure appropriate visibility timeout (at least 30 seconds)
 
-3. Create a `.env` file in the project root with the following variables:
+3. Create an S3 bucket for index storage
+
+4. Create a `.env` file in the project root with the following variables:
 ```
-AWS_REGION=us-east-1
-SQS_QUEUE_URL=your-sqs-queue-url
+AWS_REGION=eu-north-1
+SQS_QUEUE_URL=https://sqs.eu-north-1.amazonaws.com/YOUR-ACCOUNT-ID/web-crawler-content-queue
+SQS_URLS_QUEUE=https://sqs.eu-north-1.amazonaws.com/YOUR-ACCOUNT-ID/web-crawler-urls-queue
+S3_BUCKET_NAME=your-s3-bucket-name
 AWS_ACCESS_KEY_ID=YOUR_ACCESS_KEY
 AWS_SECRET_ACCESS_KEY=YOUR_SECRET_KEY
+REDIS_URL=redis://localhost:6379/0
+MAX_RETRIES=3
+HEALTH_CHECK_INTERVAL=300
+CRAWLER_NODES=http://crawler-node-1:5002,http://crawler-node-2:5002
+INDEXER_NODES=http://indexer-node-1:5003,http://indexer-node-2:5003
+MASTER_NODE_URL=http://master-node:5001
 ```
 
 ## Running the System
 
-1. Start the master node:
-```bash
-mpiexec -n 1 python master_node.py
-```
+### Option 1: MPI (Single Machine)
 
-2. Start the crawler nodes:
-```bash
-mpiexec -n <number_of_crawlers> python craweler_node.py
-```
-
-3. Start the indexer node:
 ```bash
 mpiexec --oversubscribe -n 3 python3 -m mpi4py master_node.py
 ```
-- This will start the master, crawler, and indexer nodes as separate MPI processes.
-- Watch the logs for crawling, SQS, and indexing activity.
+This will start the master, crawler, and indexer nodes as separate MPI processes.
 
----
+### Option 2: Separate Processes (Development)
 
-## 9. Monitoring and Troubleshooting
+```bash
+# Terminal 1: Start master node
+python master_node.py
 
-- **Check SQS Queue:**
-  - AWS Console → SQS → Your Queue → Monitoring tab
-  - Or use AWS CLI as above
-- **Check Logs:**
-  - Master, crawler, and indexer logs will show activity and errors
-- **Common Issues:**
-  - `.env` file missing or incorrect on any node
-  - No internet access (check VPC, subnet, route table, public IP)
-  - SQS permissions missing (ensure your AWS user can send/receive/delete messages)
-  - All dependencies not installed
+# Terminal 2: Start crawler node
+python crawler_node.py
 
----
+# Terminal 3: Start indexer node
+python indexer_node.py
 
-## 10. Stopping the System
-- Press `Ctrl+C` in the terminal running the MPI command to stop all nodes.
-
----
-
-## 11. (Optional) Run on Separate Instances
-- You can run each node on a separate EC2 instance:
-  - On master: `python3 master_node.py`
-  - On crawler: `python3 crawler_node.py`
-  - On indexer: `python3 indexer_node.py`
-- Make sure all instances have the same `.env` and codebase, and can reach each other if using MPI across hosts.
-
----
-
-## 12. Useful AWS CLI Commands
-
-- Check SQS queue attributes:
-  ```bash
-  aws sqs get-queue-attributes --queue-url YOUR_SQS_QUEUE_URL --attribute-names All --region eu-north-1
-  ```
-- Configure AWS CLI:
-  ```bash
-  aws configure
-  ```
-
----
-
-## 13. Example .env File
-```
-AWS_SECRET_ACCESS_KEY=YOUR_SECRET_KEY
-AWS_ACCESS_KEY_ID=YOUR_ACCESS_KEY
-SQS_QUEUE_URL=https://sqs.eu-north-1.amazonaws.com/961889141183/web-crawler-queue
-AWS_REGION=eu-north-1
+# Terminal 4: Start webapp
+python webapp.py
 ```
 
-Replace `<number_of_crawlers>` with the desired number of crawler nodes.
+### Option 3: Cloud Deployment
+
+For cloud deployment, run each component on a separate VM:
+- Master node: `python master_node.py` (with proper .env configuration)
+- Crawler nodes: `python crawler_node.py` (can run multiple instances)
+- Indexer nodes: `python indexer_node.py` (can run multiple instances)
+- Web app: `python webapp.py` (user interface)
+
+## Testing the System
+
+1. **Set up environment variables**
+   Make sure your .env file is properly configured with AWS credentials and queue URLs.
+
+2. **Start the system components**
+   Using one of the options described above.
+
+3. **Monitor the logs**
+   Each component will output logs showing its operation.
+
+4. **Test the crawler**
+   - Access the web interface at http://localhost:5000
+   - Enter URLs to crawl in the form and submit
+   - Monitor the crawler logs to see processing
+
+5. **Test the search**
+   - After content has been crawled and indexed
+   - Visit http://localhost:5000/search
+   - Enter search queries to retrieve results
+
+6. **Test fault tolerance**
+   - Forcibly stop one of the components (e.g., crawler_node.py)
+   - Observe messages being requeued with delay
+   - Restart the component and observe processing resume
+   - Check logs for retry behavior
+
+7. **Monitor system status**
+   - Access http://localhost:5000/monitor
+   - View health status, queue depths, and node statuses
+   - Watch for any health warnings in the logs
+
+## Fault Tolerance Architecture
+
+The system implements fault tolerance through several mechanisms:
+
+1. **Message Retry**
+   - Failed messages are marked with error_count and requeued
+   - Exponential backoff with increasing delay (60s * retry_count)
+   - Maximum retry count configurable via MAX_RETRIES
+
+2. **Health Monitoring**
+   - All nodes perform periodic health checks
+   - Queue health monitoring detects stuck processing
+   - Node health is monitored via HTTP endpoints
+
+3. **Message Persistence**
+   - SQS provides durable storage of tasks
+   - S3 stores the search index for durability
+   - Visibility timeout prevents duplicate processing
+
+4. **Error Tracking**
+   - Failed messages contain detailed error information
+   - Error counts and timestamps are tracked
+   - System logs provide diagnostic information
 
 ## Architecture
 
@@ -111,30 +150,24 @@ Communication between components is handled through:
 - MPI for direct node-to-node communication
 - AWS SQS for asynchronous message passing
 
-## Features
-
-- Distributed web crawling
-- Basic politeness measures (crawl delay)
-- URL deduplication
-- Basic in-memory indexing using Whoosh
-- Simple keyword search functionality
-- Worker health monitoring
-- Error handling and logging
-
-## Testing
-
-To test the system:
-
-1. Start all components as described above
-2. The master node will begin distributing seed URLs to crawlers
-3. Crawlers will process URLs and send content to the indexer via SQS
-4. The indexer will process messages and build the search index
-
 ## Monitoring
 
-Logs are available for each component:
-- Master node logs
-- Crawler node logs
-- Indexer node logs
+### Check SQS Queue Status
+```bash
+aws sqs get-queue-attributes --queue-url YOUR_SQS_QUEUE_URL --attribute-names All --region eu-north-1
+```
 
-Check the console output for real-time status updates and error messages.
+### View Component Logs
+Each component will output detailed logs including:
+- Processing activity
+- Error handling
+- Health status
+- Performance metrics
+
+### Health Endpoints
+- Master: http://master-node:5001/health
+- Web app: http://webapp:5000/health
+
+## Stopping the System
+- Press `Ctrl+C` in the terminal running each process
+- For MPI, stopping the master process will stop all nodes
