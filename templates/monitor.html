@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Web Crawler Dashboard</title>
+    <title>Web Crawler Monitor</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
         body {
@@ -28,26 +28,9 @@
             border-radius: 0.25rem;
             margin-right: 5px;
         }
-        .search-result {
-            margin-bottom: 20px;
-            padding: 15px;
-            border: 1px solid #ddd;
-            border-radius: 5px;
-        }
-        .search-content {
-            max-height: 200px;
-            overflow-y: auto;
-            border: 1px solid #eee;
-            padding: 10px;
-            background-color: #f9f9f9;
-            margin-top: 10px;
-        }
         .status-chart {
             height: 300px;
             margin-bottom: 20px;
-        }
-        #statusContainer {
-            margin-bottom: 30px;
         }
         .url-list {
             max-height: 400px;
@@ -57,7 +40,7 @@
 </head>
 <body>
     <div class="container">
-        <h1 class="mb-4">Web Crawler Dashboard</h1>
+        <h1 class="mb-4">Web Crawler Monitor</h1>
         
         <div class="row mb-4">
             <div class="col-12">
@@ -67,10 +50,10 @@
                         <div class="collapse navbar-collapse">
                             <ul class="navbar-nav">
                                 <li class="nav-item">
-                                    <a class="nav-link active" href="/">Dashboard</a>
+                                    <a class="nav-link" href="/">Dashboard</a>
                                 </li>
                                 <li class="nav-item">
-                                    <a class="nav-link" href="/monitor">System Monitor</a>
+                                    <a class="nav-link active" href="/monitor">System Monitor</a>
                                 </li>
                                 <li class="nav-item">
                                     <a class="nav-link" href="/search-page">Search Page</a>
@@ -79,37 +62,6 @@
                         </div>
                     </div>
                 </nav>
-            </div>
-        </div>
-        
-        <div class="row mb-4">
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-header">Add URL to Crawl</div>
-                    <div class="card-body">
-                        <form id="addUrlForm">
-                            <div class="mb-3">
-                                <label for="url" class="form-label">URL</label>
-                                <input type="url" class="form-control" id="url" placeholder="https://example.com" required>
-                            </div>
-                            <button type="submit" class="btn btn-primary">Add URL</button>
-                        </form>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-header">Search</div>
-                    <div class="card-body">
-                        <form id="searchForm" action="/search-page" method="get">
-                            <div class="mb-3">
-                                <label for="query" class="form-label">Search Query</label>
-                                <input type="text" class="form-control" id="query" name="query" placeholder="Enter search terms" required>
-                            </div>
-                            <button type="submit" class="btn btn-primary">Search</button>
-                        </form>
-                    </div>
-                </div>
             </div>
         </div>
         
@@ -143,9 +95,9 @@
         <div class="row mb-4">
             <div class="col-12">
                 <div class="card">
-                    <div class="card-header">Search Results</div>
-                    <div class="card-body" id="searchResults">
-                        <p class="text-center">Search for something to see results here.</p>
+                    <div class="card-header">Queue Metrics</div>
+                    <div class="card-body">
+                        <canvas id="queueMetricsChart" class="status-chart"></canvas>
                     </div>
                 </div>
             </div>
@@ -169,17 +121,9 @@
             </div>
         </div>
         
-        <div class="row mb-4">
+        <div class="row">
             <div class="col-12">
-                <div class="card">
-                    <div class="card-header">Test Functions</div>
-                    <div class="card-body">
-                        <button id="insertExampleBtn" class="btn btn-secondary me-2">Insert Example Data</button>
-                        <a href="/test/check-aws" class="btn btn-secondary me-2">Check AWS</a>
-                        <a href="/test/aws-resources" class="btn btn-secondary me-2">List AWS Resources</a>
-                        <a href="/test/direct-search" class="btn btn-secondary">Direct Search</a>
-                    </div>
-                </div>
+                <a href="/" class="btn btn-secondary">Back to Dashboard</a>
             </div>
         </div>
     </div>
@@ -205,8 +149,9 @@
             '999': 'Error'
         };
         
-        // Chart instance
+        // Chart instances
         let tagChart;
+        let queueChart;
         
         // Function to format tag display
         function formatTag(tag) {
@@ -231,8 +176,16 @@
                                         <span class="badge bg-primary rounded-pill">${data.urls_queue_size}</span>
                                     </li>
                                     <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        URLs In Flight
+                                        <span class="badge bg-info rounded-pill">${data.urls_queue_inflight}</span>
+                                    </li>
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
                                         Content Queue
                                         <span class="badge bg-primary rounded-pill">${data.content_queue_size}</span>
+                                    </li>
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        Content In Flight
+                                        <span class="badge bg-info rounded-pill">${data.content_queue_inflight}</span>
                                     </li>
                                 </ul>
                             </div>
@@ -274,6 +227,9 @@
                     
                     // Update tag distribution chart
                     updateTagChart(data.message_tags || {});
+                    
+                    // Update queue metrics chart
+                    updateQueueChart(data);
                 })
                 .catch(error => {
                     console.error('Error fetching status:', error);
@@ -325,42 +281,88 @@
             });
         }
         
+        // Update queue metrics chart
+        function updateQueueChart(data) {
+            const ctx = document.getElementById('queueMetricsChart').getContext('2d');
+            
+            // Destroy existing chart if it exists
+            if (queueChart) {
+                queueChart.destroy();
+            }
+            
+            // Create new chart
+            queueChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: ['URLs Queue', 'Content Queue'],
+                    datasets: [
+                        {
+                            label: 'Visible Messages',
+                            data: [data.urls_queue_visible, data.content_queue_visible],
+                            backgroundColor: 'rgba(0, 123, 255, 0.6)',
+                            borderColor: 'rgba(0, 123, 255, 1)',
+                            borderWidth: 1
+                        },
+                        {
+                            label: 'In Flight Messages',
+                            data: [data.urls_queue_inflight, data.content_queue_inflight],
+                            backgroundColor: 'rgba(108, 117, 125, 0.6)',
+                            borderColor: 'rgba(108, 117, 125, 1)',
+                            borderWidth: 1
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            title: {
+                                display: true,
+                                text: 'Message Count'
+                            },
+                            ticks: {
+                                precision: 0
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        
         // Fetch URL list
         function fetchUrls() {
             fetch('/list-urls')
                 .then(response => response.json())
                 .then(data => {
-                    // Update tag names if available
-                    if (data.tag_mapping) {
-                        tagNames = data.tag_mapping;
-                    }
-                    
                     if (data.urls && data.urls.length > 0) {
                         const urlsHtml = `
-                            <div class="table-responsive">
-                                <table class="table table-striped">
-                                    <thead>
+                            <table class="table table-striped">
+                                <thead>
+                                    <tr>
+                                        <th>URL</th>
+                                        <th>Tag</th>
+                                        <th>Source</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    ${data.urls.map(url => `
                                         <tr>
-                                            <th>URL</th>
-                                            <th>Tag</th>
-                                            <th>Source</th>
+                                            <td><a href="${url.url}" target="_blank">${url.url}</a></td>
+                                            <td>${formatTag(url.tag)}</td>
+                                            <td>${url.source}</td>
                                         </tr>
-                                    </thead>
-                                    <tbody>
-                                        ${data.urls.map(item => `
-                                            <tr>
-                                                <td><a href="${item.url}" target="_blank">${item.url}</a></td>
-                                                <td>${formatTag(item.tag)}</td>
-                                                <td>${item.source}</td>
-                                            </tr>
-                                        `).join('')}
-                                    </tbody>
-                                </table>
-                            </div>
+                                    `).join('')}
+                                </tbody>
+                            </table>
+                            <p class="text-muted">Total: ${data.count} URLs</p>
                         `;
                         document.getElementById('urlList').innerHTML = urlsHtml;
                     } else {
-                        document.getElementById('urlList').innerHTML = '<p class="text-center">No URLs found in the system.</p>';
+                        document.getElementById('urlList').innerHTML = `
+                            <div class="alert alert-warning">No URLs available.</div>
+                        `;
                     }
                 })
                 .catch(error => {
@@ -371,139 +373,14 @@
                 });
         }
         
-        // Search function
-        function performSearch(query) {
-            document.getElementById('searchResults').innerHTML = `
-                <div class="text-center">
-                    <div class="spinner-border" role="status">
-                        <span class="visually-hidden">Loading...</span>
-                    </div>
-                    <p>Searching for "${query}"...</p>
-                </div>
-            `;
-            
-            fetch(`/search?query=${encodeURIComponent(query)}&max_results=5`)
-                .then(response => response.json())
-                .then(data => {
-                    if (data.results && data.results.length > 0) {
-                        const resultsHtml = `
-                            <h5>Found ${data.results.length} results for "${query}"</h5>
-                            ${data.results.map((result, index) => `
-                                <div class="search-result">
-                                    <div class="d-flex justify-content-between align-items-center">
-                                        <h5 class="mb-1">
-                                            <a href="${result.url}" target="_blank">${result.url}</a>
-                                        </h5>
-                                        ${formatTag(result.tag || 2)}
-                                    </div>
-                                    <div class="search-content">
-                                        <pre>${result.content || 'No content available'}</pre>
-                                    </div>
-                                    <div class="mt-2 text-muted">
-                                        Source: ${result.source}
-                                        ${result.relevance ? ` | Relevance: ${result.relevance}` : ''}
-                                    </div>
-                                </div>
-                            `).join('')}
-                        `;
-                        document.getElementById('searchResults').innerHTML = resultsHtml;
-                    } else {
-                        document.getElementById('searchResults').innerHTML = `
-                            <div class="alert alert-warning">No results found for "${query}"</div>
-                        `;
-                    }
-                })
-                .catch(error => {
-                    console.error('Error searching:', error);
-                    document.getElementById('searchResults').innerHTML = `
-                        <div class="alert alert-danger">Error searching: ${error}</div>
-                    `;
-                });
-        }
-        
-        // Add URL function
-        function addUrl(url) {
-            fetch('/add-url', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                },
-                body: `url=${encodeURIComponent(url)}`
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.status === 'success') {
-                    alert(`Success: ${data.message}`);
-                    // Refresh status and URL list
-                    fetchStatus();
-                    fetchUrls();
-                } else {
-                    alert(`Error: ${data.message}`);
-                }
-            })
-            .catch(error => {
-                console.error('Error adding URL:', error);
-                alert(`Error: ${error}`);
-            });
-        }
-        
-        // Insert example data
-        function insertExampleData() {
-            fetch('/test/insert-example')
-                .then(response => response.json())
-                .then(data => {
-                    if (data.status === 'success') {
-                        alert(`Success: ${data.message}`);
-                        // Refresh status and URL list
-                        fetchStatus();
-                        fetchUrls();
-                        
-                        // Update tag names if available
-                        if (data.tag_mapping) {
-                            tagNames = data.tag_mapping;
-                        }
-                    } else {
-                        alert(`Error: ${data.error}`);
-                    }
-                })
-                .catch(error => {
-                    console.error('Error inserting example data:', error);
-                    alert(`Error: ${error}`);
-                });
-        }
-        
-        // Event listeners
+        // Initial data load
         document.addEventListener('DOMContentLoaded', function() {
-            // Initial data load
             fetchStatus();
             fetchUrls();
             
-            // Set up polling for status updates
-            setInterval(fetchStatus, 10000); // Update every 10 seconds
+            // Set up polling for updates
+            setInterval(fetchStatus, 10000); // Update status every 10 seconds
             setInterval(fetchUrls, 30000);   // Update URLs every 30 seconds
-            
-            // Add URL form
-            document.getElementById('addUrlForm').addEventListener('submit', function(e) {
-                e.preventDefault();
-                const url = document.getElementById('url').value;
-                if (url) {
-                    addUrl(url);
-                }
-            });
-            
-            // Search form
-            document.getElementById('searchForm').addEventListener('submit', function(e) {
-                e.preventDefault();
-                const query = document.getElementById('query').value;
-                if (query) {
-                    performSearch(query);
-                }
-            });
-            
-            // Insert example data button
-            document.getElementById('insertExampleBtn').addEventListener('click', function() {
-                insertExampleData();
-            });
         });
     </script>
 </body>

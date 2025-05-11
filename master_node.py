@@ -132,6 +132,36 @@ def master_process():
                 master.print_status()
                 master.last_status_print = current_time
             
+            # Check for processed URLs by looking for content messages
+            try:
+                # Get a sample of messages from content queue to check for processed URLs
+                content_msgs = sqs_client.receive_message(
+                    QueueUrl=SQS_QUEUE_URL,
+                    MaxNumberOfMessages=10,
+                    VisibilityTimeout=5,  # Short timeout just to check
+                    WaitTimeSeconds=1
+                )
+                
+                if 'Messages' in content_msgs:
+                    for msg in content_msgs['Messages']:
+                        try:
+                            body = json.loads(msg['Body'])
+                            if 'url' in body and body['tag'] == MSG_TAG_CONTENT:
+                                # This is a processed URL - add to crawled set
+                                master.crawled_urls.add(body['url'])
+                                logger.info(f"Added {body['url']} to crawled URLs list (total: {len(master.crawled_urls)})")
+                            
+                            # Return message to queue without changing it
+                            sqs_client.change_message_visibility(
+                                QueueUrl=SQS_QUEUE_URL,
+                                ReceiptHandle=msg['ReceiptHandle'],
+                                VisibilityTimeout=0
+                            )
+                        except Exception as msg_err:
+                            logger.error(f"Error processing status message: {str(msg_err)}")
+            except Exception as queue_err:
+                logger.error(f"Error checking content queue: {str(queue_err)}")
+            
             time.sleep(1)  # Small delay to prevent CPU overuse
             
         except Exception as e:

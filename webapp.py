@@ -1188,6 +1188,26 @@ def check_aws():
     
     return html
 
+@app.route('/monitor')
+def monitor():
+    """Render the system monitoring page"""
+    return render_template('monitor.html')
+
+@app.route('/search-page')
+def search_page():
+    """Render the search page with results"""
+    query = request.args.get('query', '')
+    max_results = int(request.args.get('max_results', '10'))
+    
+    results = []
+    if query:
+        # Call the search function internally to get results
+        search_response = search()
+        search_data = json.loads(search_response.get_data(as_text=True))
+        results = search_data.get('results', [])
+    
+    return render_template('search.html', query=query, results=results)
+
 if __name__ == '__main__':
     # Create templates directory if it doesn't exist
     os.makedirs('templates', exist_ok=True)
