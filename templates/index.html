@@ -36,7 +36,7 @@
             <div class="bg-white shadow-md rounded-lg p-6">
                 <h2 class="text-xl font-semibold text-gray-800 mb-4">System Status</h2>
                 
-                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
                     <div class="bg-blue-50 border border-blue-100 rounded-lg p-4 text-center">
                         <h3 class="text-blue-800 font-medium mb-2">URLs Queue</h3>
                         <div id="urls-queue" class="text-3xl font-bold text-blue-600">Loading...</div>
@@ -51,6 +51,11 @@
                         <h3 class="text-purple-800 font-medium mb-2">S3 Storage</h3>
                         <div id="s3-status" class="text-3xl font-bold text-purple-600">Loading...</div>
                     </div>
+                    
+                    <div class="bg-amber-50 border border-amber-100 rounded-lg p-4 text-center">
+                        <h3 class="text-amber-800 font-medium mb-2">Indexed Docs</h3>
+                        <div id="indexed-docs" class="text-3xl font-bold text-amber-600">Loading...</div>
+                    </div>
                 </div>
             </div>
         </section>
@@ -59,6 +64,7 @@
         <section class="mb-8">
             <div class="bg-white shadow-md rounded-lg p-6">
                 <h2 class="text-xl font-semibold text-gray-800 mb-4">Add URL to Crawl</h2>
+                <p class="text-gray-500 mb-4">Each domain is limited to 10 URLs to prevent endless crawling</p>
                 
                 <form id="url-form" class="space-y-4">
                     <div class="flex flex-col md:flex-row gap-4">
@@ -86,7 +92,7 @@
         <section class="mb-8">
             <div class="bg-white shadow-md rounded-lg p-6">
                 <h2 class="text-xl font-semibold text-gray-800 mb-4">Search Indexed Content</h2>
-                <p class="text-gray-500 mb-4">Search results are fetched directly from the S3 bucket</p>
+                <p class="text-gray-500 mb-4">Only the most relevant results are shown</p>
                 
                 <form id="search-form" class="space-y-4">
                     <div class="flex flex-col md:flex-row gap-4">
@@ -97,6 +103,15 @@
                             required
                             class="flex-1 px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
                         >
+                        <select
+                            id="max-results"
+                            class="px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary"
+                        >
+                            <option value="1">Top result</option>
+                            <option value="3" selected>Top 3</option>
+                            <option value="5">Top 5</option>
+                            <option value="10">Top 10</option>
+                        </select>
                         <button 
                             type="submit"
                             class="px-6 py-2 bg-primary text-white font-medium rounded-md hover:bg-blue-700 transition duration-200 md:w-auto w-full"
@@ -148,6 +163,13 @@
                     } else {
                         s3StatusElement.classList.add('text-danger');
                     }
+                    
+                    // Update indexed documents count
+                    const indexedDocsEl = document.getElementById('indexed-docs');
+                    indexedDocsEl.innerHTML = `
+                        <div class="text-3xl font-bold text-amber-600">${data.indexed_docs || 0}</div>
+                        <div class="text-sm text-amber-500">documents</div>
+                    `;
                 })
                 .catch(error => console.error('Error fetching status:', error));
         }
@@ -190,10 +212,11 @@
         document.getElementById('search-form').addEventListener('submit', function(e) {
             e.preventDefault();
             const query = document.getElementById('search-input').value;
+            const maxResults = document.getElementById('max-results').value;
             const resultsElement = document.getElementById('search-results');
-            resultsElement.innerHTML = '<p class="text-gray-600">Searching S3 bucket...</p>';
+            resultsElement.innerHTML = '<p class="text-gray-600">Searching for top matches...</p>';
             
-            fetch(`/search?query=${encodeURIComponent(query)}`)
+            fetch(`/search?query=${encodeURIComponent(query)}&max_results=${maxResults}`)
                 .then(response => {
                     if (!response.ok) {
                         throw new Error(`HTTP error ${response.status}`);
@@ -207,7 +230,7 @@
                     if (!data.results || data.results.length === 0) {
                         resultsElement.innerHTML = '<p class="text-gray-600">No results found</p>';
                     } else {
-                        data.results.forEach(result => {
+                        data.results.forEach((result, index) => {
                             const div = document.createElement('div');
                             div.className = 'p-4 border border-gray-200 rounded-md hover:bg-gray-50 transition duration-100 mb-4';
                             
@@ -215,9 +238,15 @@
                             const url = result.url || 'No URL found';
                             const content = result.content || 'No content available';
                             const source = result.source || 'unknown';
+                            const relevance = result.relevance || 0;
                             
                             // Create HTML for the result
                             let resultHTML = '';
+                            
+                            // Show rank for multiple results
+                            if (data.results.length > 1) {
+                                resultHTML += `<div class="absolute -ml-10 mt-1 w-8 h-8 rounded-full bg-${index === 0 ? 'yellow' : 'gray'}-200 flex items-center justify-center font-bold text-${index === 0 ? 'yellow' : 'gray'}-800">#${index+1}</div>`;
+                            }
                             
                             // Handle S3 keys differently
                             if (typeof url === 'string' && url.startsWith('S3:')) {
@@ -229,7 +258,7 @@
                             // Add content preview in a scrollable container
                             resultHTML += `
                                 <div class="mt-2">
-                                    <p class="text-xs text-gray-500 mb-1">Source: ${source}</p>
+                                    <p class="text-xs text-gray-500 mb-1">Source: ${source} | Relevance: ${relevance}</p>
                                     <div class="bg-gray-50 p-3 rounded border border-gray-200 max-h-40 overflow-y-auto">
                                         <p class="text-sm text-gray-800 whitespace-pre-line">${content}</p>
                                     </div>

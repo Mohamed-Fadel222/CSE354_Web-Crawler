@@ -46,6 +46,26 @@ class Crawler:
         self.session.timeout = 10  # Set timeout for all requests
         self.crawler_id = str(uuid.uuid4())[:8]  # Generate a short unique ID for this crawler
         logger.info(f"Crawler initialized with ID: {self.crawler_id}")
+        
+        # Domain crawl limits - track URLs per domain
+        self.domain_url_counts = {}
+        self.max_urls_per_domain = 10  # Maximum URLs to crawl per domain
+        
+    def should_crawl_url(self, url):
+        """Check if we should crawl this URL based on domain limits"""
+        if url in self.visited_urls:
+            return False
+            
+        domain = self.get_domain_from_url(url)
+        if not domain:
+            return False
+            
+        # Check if we've reached domain limit
+        if domain in self.domain_url_counts and self.domain_url_counts[domain] >= self.max_urls_per_domain:
+            logger.info(f"[Crawler-{self.crawler_id}] Skipping {url} - reached limit of {self.max_urls_per_domain} URLs for domain {domain}")
+            return False
+            
+        return True
 
     def fetch_page(self, url):
         try:
@@ -135,13 +155,28 @@ class Crawler:
         """
         Process a URL by crawling it and sending discovered URLs to the queue
         """
+        # Check if we should crawl this URL
+        domain = self.get_domain_from_url(url)
+        if not domain:
+            logger.warning(f"[Crawler-{self.crawler_id}] Invalid domain for URL: {url}")
+            return
+            
         # Skip if already visited
         if url in self.visited_urls:
             logger.info(f"[Crawler-{self.crawler_id}] Already visited {url}, skipping")
             return
+            
+        # Check domain limits
+        if domain in self.domain_url_counts and self.domain_url_counts[domain] >= self.max_urls_per_domain:
+            logger.info(f"[Crawler-{self.crawler_id}] Skipping {url} - reached limit of {self.max_urls_per_domain} URLs for domain {domain}")
+            return
 
         logger.info(f"[Crawler-{self.crawler_id}] Processing URL: {url}")
         self.visited_urls.add(url)
+        
+        # Update domain counter
+        self.domain_url_counts[domain] = self.domain_url_counts.get(domain, 0) + 1
+        logger.info(f"[Crawler-{self.crawler_id}] Domain {domain}: {self.domain_url_counts[domain]}/{self.max_urls_per_domain} URLs processed")
         
         # Fetch and parse the page
         html = self.fetch_page(url)
@@ -170,15 +205,22 @@ class Crawler:
             if extracted_urls:
                 urls_queued = 0
                 for new_url in extracted_urls:
-                    try:
-                        response = sqs_client.send_message(
-                            QueueUrl=SQS_URLS_QUEUE,
-                            MessageBody=json.dumps({'url': new_url})
-                        )
-                        urls_queued += 1
-                        logger.info(f"[Crawler-{self.crawler_id}] Queued new URL for crawling: {new_url} (MessageId: {response.get('MessageId')})")
-                    except Exception as e:
-                        logger.error(f"[Crawler-{self.crawler_id}] Error queuing URL {new_url}: {str(e)}")
+                    new_domain = self.get_domain_from_url(new_url)
+                    
+                    # Only queue if we haven't hit the domain limit yet
+                    current_count = self.domain_url_counts.get(new_domain, 0)
+                    if current_count < self.max_urls_per_domain:
+                        try:
+                            response = sqs_client.send_message(
+                                QueueUrl=SQS_URLS_QUEUE,
+                                MessageBody=json.dumps({'url': new_url})
+                            )
+                            urls_queued += 1
+                            logger.info(f"[Crawler-{self.crawler_id}] Queued new URL for crawling: {new_url} (MessageId: {response.get('MessageId')})")
+                        except Exception as e:
+                            logger.error(f"[Crawler-{self.crawler_id}] Error queuing URL {new_url}: {str(e)}")
+                    else:
+                        logger.info(f"[Crawler-{self.crawler_id}] Skipping {new_url} - domain {new_domain} reached limit of {self.max_urls_per_domain}")
                 
                 logger.info(f"[Crawler-{self.crawler_id}] SUCCESS: Queued {urls_queued} URLs from {url} for further crawling")
                             
