@@ -10,6 +10,7 @@ import time
 import tempfile
 import shutil
 from message_tags import *  # Import all message tags
+from botocore.exceptions import ClientError
 
 # Load environment variables
 load_dotenv()
@@ -21,6 +22,7 @@ logger = logging.getLogger('Indexer')
 # AWS Configuration
 AWS_REGION = os.getenv('AWS_REGION', 'eu-north-1')
 SQS_QUEUE_URL = os.getenv('SQS_QUEUE_URL')
+SQS_QUEUE_NAME = os.path.basename(SQS_QUEUE_URL) if SQS_QUEUE_URL else 'web-crawler-queue'
 S3_BUCKET_NAME = os.getenv('S3_BUCKET_NAME')
 logger.info(f"Using SQS Queue URL: {SQS_QUEUE_URL}")
 logger.info(f"Using AWS Region: {AWS_REGION}")
@@ -28,7 +30,39 @@ logger.info(f"Using S3 Bucket: {S3_BUCKET_NAME}")
 
 # Initialize AWS clients
 sqs_client = boto3.client('sqs', region_name=AWS_REGION)
+sqs_resource = boto3.resource('sqs', region_name=AWS_REGION)
 s3_client = boto3.client('s3', region_name=AWS_REGION)
+
+def ensure_sqs_queue_exists():
+    """Create the SQS queue if it doesn't exist already"""
+    global SQS_QUEUE_URL
+    try:
+        # Check if queue already exists
+        queues = sqs_client.list_queues(QueueNamePrefix=SQS_QUEUE_NAME)
+        if 'QueueUrls' in queues and queues['QueueUrls']:
+            SQS_QUEUE_URL = queues['QueueUrls'][0]
+            logger.info(f"Found existing queue: {SQS_QUEUE_URL}")
+            return SQS_QUEUE_URL
+        
+        # Create the queue
+        response = sqs_client.create_queue(
+            QueueName=SQS_QUEUE_NAME,
+            Attributes={
+                'VisibilityTimeout': '30',
+                'MessageRetentionPeriod': '86400'  # 1 day
+            }
+        )
+        SQS_QUEUE_URL = response['QueueUrl']
+        logger.info(f"Created new SQS queue: {SQS_QUEUE_URL}")
+        return SQS_QUEUE_URL
+    except Exception as e:
+        logger.error(f"Error ensuring SQS queue exists: {str(e)}")
+        return None
+
+# Ensure SQS queue exists before continuing
+SQS_QUEUE_URL = ensure_sqs_queue_exists()
+if not SQS_QUEUE_URL:
+    logger.error("Failed to create or find SQS queue. Check your AWS permissions.")
 
 class Indexer:
     def __init__(self):
@@ -109,6 +143,10 @@ class Indexer:
 
     def _send_error_message(self, error_msg):
         """Send error message to SQS with error tag"""
+        if not SQS_QUEUE_URL:
+            logger.error(f"Cannot send error message - no queue URL: {error_msg}")
+            return
+            
         try:
             sqs_client.send_message(
                 QueueUrl=SQS_QUEUE_URL,
@@ -119,11 +157,26 @@ class Indexer:
                 })
             )
             logger.info(f"Sent error message: {error_msg}")
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'AWS.SimpleQueueService.NonExistentQueue':
+                # Try to recreate queue
+                global SQS_QUEUE_URL
+                SQS_QUEUE_URL = ensure_sqs_queue_exists()
+                if SQS_QUEUE_URL:
+                    logger.info(f"Recreated queue: {SQS_QUEUE_URL}")
+                    # Try again with new queue
+                    self._send_error_message(error_msg)
+            else:
+                logger.error(f"Failed to send error message: {str(e)}")
         except Exception as e:
             logger.error(f"Failed to send error message: {str(e)}")
 
     def _send_heartbeat(self, status_msg="Indexer running"):
         """Send heartbeat message to SQS"""
+        if not SQS_QUEUE_URL:
+            logger.error(f"Cannot send heartbeat - no queue URL: {status_msg}")
+            return
+            
         try:
             sqs_client.send_message(
                 QueueUrl=SQS_QUEUE_URL,
@@ -134,6 +187,14 @@ class Indexer:
                 })
             )
             logger.debug(f"Sent heartbeat: {status_msg}")
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'AWS.SimpleQueueService.NonExistentQueue':
+                # Try to recreate queue
+                global SQS_QUEUE_URL
+                SQS_QUEUE_URL = ensure_sqs_queue_exists()
+                if SQS_QUEUE_URL:
+                    logger.info(f"Recreated queue: {SQS_QUEUE_URL}")
+            logger.error(f"Failed to send heartbeat: {str(e)}")
         except Exception as e:
             logger.error(f"Failed to send heartbeat: {str(e)}")
 
@@ -176,12 +237,26 @@ class Indexer:
                 logger.warning(f"Received message with unknown tag: {tag}")
             
             # Delete the message from the queue
-            sqs_client.delete_message(
-                QueueUrl=SQS_QUEUE_URL,
-                ReceiptHandle=message['ReceiptHandle']
-            )
-            
-            logger.info(f"Successfully processed and deleted message with tag {tag}")
+            if SQS_QUEUE_URL:
+                try:
+                    sqs_client.delete_message(
+                        QueueUrl=SQS_QUEUE_URL,
+                        ReceiptHandle=message['ReceiptHandle']
+                    )
+                    logger.info(f"Successfully processed and deleted message with tag {tag}")
+                except ClientError as e:
+                    if e.response['Error']['Code'] == 'AWS.SimpleQueueService.NonExistentQueue':
+                        # Queue doesn't exist anymore
+                        global SQS_QUEUE_URL
+                        SQS_QUEUE_URL = ensure_sqs_queue_exists()
+                        if SQS_QUEUE_URL:
+                            # Try again with new queue
+                            logger.info(f"Recreated queue: {SQS_QUEUE_URL}")
+                            # Note: Can't delete the message as it was from the old queue
+                    else:
+                        logger.error(f"Error deleting message: {str(e)}")
+            else:
+                logger.warning("Cannot delete message - no queue URL")
             
         except json.JSONDecodeError as e:
             logger.error(f"Error decoding message: {str(e)}")
@@ -193,13 +268,16 @@ class Indexer:
             logger.error(f"Error processing message: {str(e)}")
         
         # Always try to delete the message to prevent reprocessing
-        try:
-            sqs_client.delete_message(
-                QueueUrl=SQS_QUEUE_URL,
-                ReceiptHandle=message['ReceiptHandle']
-            )
-        except Exception as e:
-            logger.error(f"Error deleting message: {str(e)}")
+        # (only if we haven't already done it above)
+        if 'ReceiptHandle' in message and SQS_QUEUE_URL:
+            try:
+                sqs_client.delete_message(
+                    QueueUrl=SQS_QUEUE_URL,
+                    ReceiptHandle=message['ReceiptHandle']
+                )
+            except Exception as e:
+                # Ignore errors here as we might have already deleted it
+                pass
 
     def indexer_loop(self):
         last_heartbeat = 0
@@ -211,17 +289,38 @@ class Indexer:
                     self._send_heartbeat()
                     last_heartbeat = current_time
                 
+                global SQS_QUEUE_URL
+                if not SQS_QUEUE_URL:
+                    # Try to recreate the queue
+                    SQS_QUEUE_URL = ensure_sqs_queue_exists()
+                    if not SQS_QUEUE_URL:
+                        logger.error("Still no SQS queue URL. Waiting before retry...")
+                        time.sleep(30)  # Wait longer before retrying
+                        continue
+                
                 # Receive messages from SQS
-                response = sqs_client.receive_message(
-                    QueueUrl=SQS_QUEUE_URL,
-                    MaxNumberOfMessages=10,
-                    WaitTimeSeconds=20,
-                    VisibilityTimeout=30
-                )
+                try:
+                    response = sqs_client.receive_message(
+                        QueueUrl=SQS_QUEUE_URL,
+                        MaxNumberOfMessages=10,
+                        WaitTimeSeconds=20,
+                        VisibilityTimeout=30
+                    )
 
-                if 'Messages' in response:
-                    for message in response['Messages']:
-                        self.process_sqs_message(message)
+                    if 'Messages' in response:
+                        for message in response['Messages']:
+                            self.process_sqs_message(message)
+                except ClientError as e:
+                    if e.response['Error']['Code'] == 'AWS.SimpleQueueService.NonExistentQueue':
+                        # Try to recreate queue
+                        SQS_QUEUE_URL = ensure_sqs_queue_exists()
+                        logger.info(f"Recreated queue after receiving error: {SQS_QUEUE_URL}")
+                    else:
+                        logger.error(f"Error receiving messages: {str(e)}")
+                        time.sleep(5)
+                except Exception as e:
+                    logger.error(f"Error receiving messages: {str(e)}")
+                    time.sleep(5)
 
             except Exception as e:
                 logger.error(f"Error in indexer loop: {str(e)}")

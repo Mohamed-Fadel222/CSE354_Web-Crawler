@@ -4,24 +4,54 @@ from dotenv import load_dotenv
 from whoosh.index import open_dir
 from whoosh.qparser import QueryParser
 from message_tags import *  # Import all message tags
+from botocore.exceptions import ClientError
+import logging
 
 # ─── Config ───────────────────────────────────────────────────────────
 load_dotenv()
 AWS_REGION    = os.getenv('AWS_REGION')
 SQS_URLS_QUEUE = os.getenv('SQS_URLS_QUEUE')
+SQS_QUEUE_NAME = os.path.basename(SQS_URLS_QUEUE) if SQS_URLS_QUEUE else 'web-crawler-queue'
 S3_BUCKET     = os.getenv('S3_BUCKET')
 
-# ─── Message Tags ─────────────────────────────────────────────────────
-# Communication Tags for message differentiation
-MSG_TAG_URL_SUBMISSION = 0    # URL to be crawled
-MSG_TAG_CONTENT_SUBMISSION = 1  # Content to be indexed
-MSG_TAG_SEARCH_REQUEST = 2    # Search request
-MSG_TAG_ERROR = 99           # Error/exception
-MSG_TAG_HEARTBEAT = 999      # System status/heartbeat
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger('Webapp')
 
 # ─── AWS Clients ──────────────────────────────────────────────────────
 sqs = boto3.client('sqs', region_name=AWS_REGION)
-# (we'll use S3 below in the crawler)
+sqs_resource = boto3.resource('sqs', region_name=AWS_REGION)
+
+def ensure_sqs_queue_exists():
+    """Create the SQS queue if it doesn't exist already"""
+    global SQS_URLS_QUEUE
+    try:
+        # Check if queue already exists
+        queues = sqs.list_queues(QueueNamePrefix=SQS_QUEUE_NAME)
+        if 'QueueUrls' in queues and queues['QueueUrls']:
+            SQS_URLS_QUEUE = queues['QueueUrls'][0]
+            logger.info(f"Found existing queue: {SQS_URLS_QUEUE}")
+            return SQS_URLS_QUEUE
+        
+        # Create the queue
+        response = sqs.create_queue(
+            QueueName=SQS_QUEUE_NAME,
+            Attributes={
+                'VisibilityTimeout': '30',
+                'MessageRetentionPeriod': '86400'  # 1 day
+            }
+        )
+        SQS_URLS_QUEUE = response['QueueUrl']
+        logger.info(f"Created new SQS queue: {SQS_URLS_QUEUE}")
+        return SQS_URLS_QUEUE
+    except Exception as e:
+        logger.error(f"Error ensuring SQS queue exists: {str(e)}")
+        return None
+
+# Ensure SQS queue exists before continuing
+SQS_URLS_QUEUE = ensure_sqs_queue_exists()
+if not SQS_URLS_QUEUE:
+    logger.error("Failed to create or find SQS queue. Check your AWS permissions.")
 
 # ─── Simple Whoosh wrapper for search ─────────────────────────────────
 class SimpleIndexer:
@@ -35,6 +65,10 @@ class SimpleIndexer:
 
 # For remote search (through SQS if needed)
 def search_via_sqs(query_text):
+    if not SQS_URLS_QUEUE:
+        logger.error("Cannot send search request - SQS queue not available")
+        return []
+        
     try:
         # Send a search request message
         response = sqs.send_message(
@@ -48,8 +82,19 @@ def search_via_sqs(query_text):
         # In a real system, we would wait for response
         # This is a simplified version
         return []
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'AWS.SimpleQueueService.NonExistentQueue':
+            # Try to recreate queue
+            global SQS_URLS_QUEUE
+            SQS_URLS_QUEUE = ensure_sqs_queue_exists()
+            if SQS_URLS_QUEUE:
+                logger.info(f"Recreated queue: {SQS_URLS_QUEUE}")
+                # Try again with new queue
+                return search_via_sqs(query_text)
+        logger.error(f"Error sending search request: {str(e)}")
+        return []
     except Exception as e:
-        print(f"Error sending search request: {str(e)}")
+        logger.error(f"Error sending search request: {str(e)}")
         return []
 
 indexer = SimpleIndexer()
@@ -59,6 +104,9 @@ app = Flask(__name__)
 
 # Helper to check system status via heartbeat messages
 def check_system_status():
+    if not SQS_URLS_QUEUE:
+        return {'status': 'error', 'errors': ['SQS queue not available'], 'heartbeats': []}
+        
     try:
         # Check for any error messages
         response = sqs.receive_message(
@@ -89,15 +137,26 @@ def check_system_status():
                         ReceiptHandle=message['ReceiptHandle']
                     )
                 except Exception as e:
-                    print(f"Error processing status message: {str(e)}")
+                    logger.error(f"Error processing status message: {str(e)}")
         
         return {
             'errors': errors,
             'heartbeats': heartbeats,
             'status': 'error' if errors else 'ok'
         }
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'AWS.SimpleQueueService.NonExistentQueue':
+            # Try to recreate queue
+            global SQS_URLS_QUEUE
+            SQS_URLS_QUEUE = ensure_sqs_queue_exists()
+            if SQS_URLS_QUEUE:
+                logger.info(f"Recreated queue: {SQS_URLS_QUEUE}")
+                # Try again with new queue
+                return check_system_status()
+        logger.error(f"Error checking system status: {str(e)}")
+        return {'status': 'error', 'errors': [str(e)], 'heartbeats': []}
     except Exception as e:
-        print(f"Error checking system status: {str(e)}")
+        logger.error(f"Error checking system status: {str(e)}")
         return {'status': 'unknown', 'errors': [str(e)], 'heartbeats': []}
 
 @app.route('/', methods=['GET','POST'])
@@ -107,18 +166,54 @@ def index():
     status = check_system_status()
     
     if request.method == 'POST':
+        if not SQS_URLS_QUEUE:
+            # Try to recreate queue
+            global SQS_URLS_QUEUE
+            SQS_URLS_QUEUE = ensure_sqs_queue_exists()
+            if not SQS_URLS_QUEUE:
+                status['errors'].append("Cannot submit URLs - SQS queue not available")
+                return render_template('index.html', sent=0, system_status=status, error="SQS queue not available")
+
         # User pastes one URL per line
         urls_text = request.form.get('urls','')
         urls = [u.strip() for u in urls_text.splitlines() if u.strip()]
+        sent_count = 0
+        
         for url in urls:
-            sqs.send_message(
-                QueueUrl=SQS_URLS_QUEUE,
-                MessageBody=json.dumps({
-                    'tag': MSG_TAG_URL_SUBMISSION,
-                    'url': url
-                })
-            )
-        sent = len(urls)
+            try:
+                sqs.send_message(
+                    QueueUrl=SQS_URLS_QUEUE,
+                    MessageBody=json.dumps({
+                        'tag': MSG_TAG_URL_SUBMISSION,
+                        'url': url
+                    })
+                )
+                sent_count += 1
+            except ClientError as e:
+                if e.response['Error']['Code'] == 'AWS.SimpleQueueService.NonExistentQueue':
+                    # Try to recreate queue
+                    SQS_URLS_QUEUE = ensure_sqs_queue_exists()
+                    if SQS_URLS_QUEUE:
+                        logger.info(f"Recreated queue: {SQS_URLS_QUEUE}")
+                        # Try again with new queue
+                        try:
+                            sqs.send_message(
+                                QueueUrl=SQS_URLS_QUEUE,
+                                MessageBody=json.dumps({
+                                    'tag': MSG_TAG_URL_SUBMISSION,
+                                    'url': url
+                                })
+                            )
+                            sent_count += 1
+                        except Exception as e2:
+                            logger.error(f"Error sending URL after queue recreation: {str(e2)}")
+                else:
+                    logger.error(f"Error sending URL to queue: {str(e)}")
+            except Exception as e:
+                logger.error(f"Error sending URL to queue: {str(e)}")
+                
+        sent = sent_count
+        
     return render_template('index.html', sent=sent, system_status=status)
 
 @app.route('/search', methods=['GET','POST'])
