@@ -175,55 +175,21 @@
             resultsElement.innerHTML = '<p class="text-gray-600">Searching S3 bucket...</p>';
             
             fetch(`/search?query=${encodeURIComponent(query)}`)
-                .then(response => {
-                    if (!response.ok) {
-                        throw new Error(`HTTP error ${response.status}`);
-                    }
-                    return response.json();
-                })
+                .then(response => response.json())
                 .then(data => {
-                    console.log("Search results:", data); // Log the results for debugging
                     resultsElement.innerHTML = '';
-                    
-                    if (!data.results || data.results.length === 0) {
+                    if (data.results.length === 0) {
                         resultsElement.innerHTML = '<p class="text-gray-600">No results found</p>';
                     } else {
-                        data.results.forEach(result => {
+                        data.results.forEach(url => {
                             const div = document.createElement('div');
-                            div.className = 'p-4 border border-gray-200 rounded-md hover:bg-gray-50 transition duration-100 mb-4';
-                            
-                            // Get URL and content from result
-                            const url = result.url || 'No URL found';
-                            const content = result.content || 'No content available';
-                            const source = result.source || 'unknown';
-                            
-                            // Create HTML for the result
-                            let resultHTML = '';
-                            
-                            // Handle S3 keys differently
-                            if (url.startsWith('S3:')) {
-                                resultHTML += `<div class="mb-2"><span class="text-purple-600 font-medium text-lg">${url}</span></div>`;
-                            } else {
-                                resultHTML += `<div class="mb-2"><a href="${url}" target="_blank" class="text-primary font-medium text-lg hover:underline">${url}</a></div>`;
-                            }
-                            
-                            // Add content preview in a scrollable container
-                            resultHTML += `
-                                <div class="mt-2">
-                                    <p class="text-xs text-gray-500 mb-1">Source: ${source}</p>
-                                    <div class="bg-gray-50 p-3 rounded border border-gray-200 max-h-40 overflow-y-auto">
-                                        <p class="text-sm text-gray-800 whitespace-pre-line">${content}</p>
-                                    </div>
-                                </div>
-                            `;
-                            
-                            div.innerHTML = resultHTML;
+                            div.className = 'p-3 border border-gray-200 rounded-md hover:bg-gray-50 transition duration-100';
+                            div.innerHTML = `<a href="${url}" target="_blank" class="text-primary hover:underline">${url}</a>`;
                             resultsElement.appendChild(div);
                         });
                     }
                 })
                 .catch(error => {
-                    console.error("Search error:", error);
                     resultsElement.innerHTML = `<p class="text-danger">Error performing search: ${error}</p>`;
                 });
         });
