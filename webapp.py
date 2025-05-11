@@ -4,10 +4,7 @@ import os
 import logging
 import json
 from dotenv import load_dotenv
-from indexer_node import Indexer
 import tempfile
-from celery import Celery
-from celery_config import app as celery_app
 
 # Load environment variables
 load_dotenv()
@@ -20,20 +17,19 @@ logger = logging.getLogger('WebApp')
 AWS_REGION = os.getenv('AWS_REGION', 'eu-north-1')
 SQS_QUEUE_URL = os.getenv('SQS_QUEUE_URL')
 SQS_URLS_QUEUE = os.getenv('SQS_URLS_QUEUE')
+S3_BUCKET_NAME = os.getenv('S3_BUCKET_NAME')
 
 # Initialize AWS clients
 sqs_client = boto3.client('sqs', region_name=AWS_REGION)
+s3_client = boto3.client('s3', region_name=AWS_REGION)
 
 # Initialize Flask app
 app = Flask(__name__)
 
-# Initialize indexer for search
-temp_dir = tempfile.mkdtemp()
-indexer = Indexer()
-
 @app.route('/')
 def index():
     """Home page with system status and controls"""
+    logger.info("Rendering index.html template")
     return render_template('index.html')
 
 @app.route('/add-url', methods=['POST'])
@@ -56,12 +52,56 @@ def add_url():
 
 @app.route('/search')
 def search():
-    """Search the indexed content"""
+    """Search indexed content directly from S3"""
     query = request.args.get('query', '')
-    if query:
-        results = indexer.search(query)
-        return jsonify({"results": results})
-    return jsonify({"results": []})
+    if not query:
+        return jsonify({"results": []})
+    
+    try:
+        logger.info(f"Searching for '{query}' in S3 bucket")
+        
+        # List search results folder in S3
+        results = []
+        try:
+            # Get list of all indexed documents
+            paginator = s3_client.get_paginator('list_objects_v2')
+            
+            # Search through S3 objects for the query term
+            for page in paginator.paginate(Bucket=S3_BUCKET_NAME, Prefix='index/'):
+                if 'Contents' in page:
+                    for obj in page['Contents']:
+                        try:
+                            # Download the object metadata to check for matches
+                            key = obj['Key']
+                            if key.endswith('.json'):  # Assuming indexed content is stored as JSON
+                                response = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=key)
+                                content = json.loads(response['Body'].read().decode('utf-8'))
+                                
+                                # Very simple search - check if query appears in content
+                                if 'url' in content and 'content' in content:
+                                    if query.lower() in content['content'].lower():
+                                        results.append(content['url'])
+                                        
+                                        # Limit to 10 results to avoid overwhelming response
+                                        if len(results) >= 10:
+                                            break
+                        except Exception as e:
+                            logger.error(f"Error processing S3 object {key}: {str(e)}")
+                            continue
+                            
+                    # Break pagination if we have enough results
+                    if len(results) >= 10:
+                        break
+        
+            logger.info(f"Found {len(results)} results for '{query}'")
+            return jsonify({"results": results})
+        except Exception as e:
+            logger.error(f"Error searching S3: {str(e)}")
+            return jsonify({"results": [], "error": str(e)}), 500
+    
+    except Exception as e:
+        logger.error(f"Error in search: {str(e)}")
+        return jsonify({"results": [], "error": str(e)}), 500
 
 @app.route('/status')
 def status():
@@ -81,9 +121,17 @@ def status():
         urls_queue_size = int(urls_queue_attrs['Attributes']['ApproximateNumberOfMessages'])
         content_queue_size = int(content_queue_attrs['Attributes']['ApproximateNumberOfMessages'])
         
+        # Check S3 bucket status
+        try:
+            s3_client.head_bucket(Bucket=S3_BUCKET_NAME)
+            s3_status = "available"
+        except Exception:
+            s3_status = "unavailable"
+            
         status_data = {
             "urls_queue_size": urls_queue_size,
-            "content_queue_size": content_queue_size
+            "content_queue_size": content_queue_size,
+            "s3_status": s3_status
         }
         
         return jsonify(status_data)
@@ -96,4 +144,17 @@ if __name__ == '__main__':
     os.makedirs('templates', exist_ok=True)
     os.makedirs('static', exist_ok=True)
     
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    logger.info(f"Starting web server on http://localhost:5000")
+    
+    # Check if templates directory contains index.html
+    template_path = os.path.join(os.path.dirname(__file__), 'templates', 'index.html')
+    if os.path.exists(template_path):
+        logger.info(f"Found template at {template_path}")
+    else:
+        logger.error(f"Template file not found at {template_path}")
+    
+    # Start the web server
+    try:
+        app.run(debug=True, host='0.0.0.0', port=5000)
+    except Exception as e:
+        logger.error(f"Failed to start web server: {str(e)}")

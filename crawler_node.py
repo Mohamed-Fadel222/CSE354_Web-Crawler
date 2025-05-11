@@ -72,8 +72,8 @@ class Crawler:
                 if self.is_valid_url(absolute_url) and absolute_url not in self.visited_urls:
                     urls.append(absolute_url)
             
-            logger.info(f"Extracted {len(urls)} new URLs from {base_url}")
-            return urls[:10]  # Limit to 10 URLs per page to prevent overwhelming
+            logger.info(f"Extracted {len(urls)} URLs from {base_url} (not sending to queue per configuration)")
+            return urls[:10]  # Limit to 10 URLs per page
         except Exception as e:
             logger.error(f"Error extracting URLs from {base_url}: {str(e)}")
             return []
@@ -115,22 +115,11 @@ class Crawler:
         # Fetch and parse the page
         html = self.fetch_page(url)
         if html:
-            # Extract URLs and text content
+            # Extract URLs and text content - but don't send extracted URLs to queue
             extracted_urls = self.extract_urls(html, url)
             extracted_text = self.extract_text(html)
             
             if extracted_text:
-                # Send extracted URLs to the URLs queue
-                for new_url in extracted_urls:
-                    try:
-                        sqs_client.send_message(
-                            QueueUrl=SQS_URLS_QUEUE,
-                            MessageBody=json.dumps({'url': new_url})
-                        )
-                        logger.info(f"Sent new URL to queue: {new_url}")
-                    except Exception as e:
-                        logger.error(f"Error sending URL to queue: {str(e)}")
-                
                 # Send content to indexer queue
                 message_body = {
                     'url': url,
@@ -147,7 +136,7 @@ class Crawler:
                     logger.error(f"Error sending to SQS: {str(e)}")
 
 def crawler_process():
-    logger.info("Crawler node started")
+    logger.info("Crawler node started - ONLY processing URLs from web app, not auto-discovering")
     crawler = Crawler()
     
     while True:
