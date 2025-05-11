@@ -1,0 +1,30 @@
+2025-05-11 22:08:22,842 - WebApp - INFO - AWS Region: eu-north-1
+2025-05-11 22:08:22,843 - WebApp - INFO - SQS Content Queue: https://sqs.eu-north-1.amazonaws.com/961889141183/content-to-index
+2025-05-11 22:08:22,843 - WebApp - INFO - SQS URLs Queue: https://sqs.eu-north-1.amazonaws.com/961889141183/urls-to-crawl
+2025-05-11 22:08:22,844 - WebApp - INFO - S3 Bucket: cse354-indexer
+2025-05-11 22:08:22,844 - WebApp - INFO - Message tag definitions:
+2025-05-11 22:08:22,844 - WebApp - INFO -   CONTENT_HTML = 11
+2025-05-11 22:08:22,845 - WebApp - INFO -   CONTENT_MEDIA = 12
+2025-05-11 22:08:22,845 - WebApp - INFO -   CONTENT_TEXT = 10
+2025-05-11 22:08:22,845 - WebApp - INFO -   HEARTBEAT = 99
+2025-05-11 22:08:22,846 - WebApp - INFO -   SHUTDOWN = 999
+2025-05-11 22:08:22,846 - WebApp - INFO -   STATUS_ERROR = 22
+2025-05-11 22:08:22,847 - WebApp - INFO -   STATUS_SUCCESS = 20
+2025-05-11 22:08:22,847 - WebApp - INFO -   STATUS_WARNING = 21
+2025-05-11 22:08:22,847 - WebApp - INFO -   SYSTEM_COMMAND = 92
+2025-05-11 22:08:22,847 - WebApp - INFO -   SYSTEM_CONFIG = 91
+2025-05-11 22:08:22,848 - WebApp - INFO -   SYSTEM_INFO = 90
+2025-05-11 22:08:22,848 - WebApp - INFO -   URL_NEW = 0
+2025-05-11 22:08:22,848 - WebApp - INFO -   URL_PRIORITY = 2
+2025-05-11 22:08:22,849 - WebApp - INFO -   URL_RETRY = 1
+2025-05-11 22:08:23,065 - botocore.credentials - INFO - Found credentials in environment variables.
+2025-05-11 22:08:23,382 - WebApp - INFO - AWS clients initialized with retry configuration
+2025-05-11 22:08:23,385 - WebApp - INFO - Initialized webapp with ID: webapp-Kareem
+2025-05-11 22:08:23,392 - WebApp - INFO - Starting web server on http://localhost:5000
+2025-05-11 22:08:23,394 - WebApp - INFO - Found template at D:\CSE354_Web-Crawler\templates\index.html
+2025-05-11 22:08:23,395 - WebApp - INFO - Refreshing URL cache
+2025-05-11 22:08:27,938 - WebApp - INFO - Found URL in S3 JSON: https://e-commerce-xi-five-44.vercel.app/
+2025-05-11 22:08:29,276 - WebApp - INFO - URL cache refreshed with 1 URLs
+2025-05-11 22:08:29,307 - werkzeug - WARNING -  * Debugger is active!
+2025-05-11 22:08:29,312 - werkzeug - INFO -  * Debugger PIN: 114-542-168
+2025-05-11 22:08:34,453 - werkzeug - INFO -  * Detected change in 'D:\\CSE354_Web-Crawler\\crawler_node.py', reloading
