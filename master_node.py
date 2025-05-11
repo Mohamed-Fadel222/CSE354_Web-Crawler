@@ -20,10 +20,10 @@ logger = logging.getLogger('Master')
 AWS_REGION = os.getenv('AWS_REGION', 'eu-north-1')
 SQS_QUEUE_URL = os.getenv('SQS_QUEUE_URL')  # Content queue
 SQS_URLS_QUEUE = os.getenv('SQS_URLS_QUEUE')  # URLs queue
+SQS_DLQ_URL = os.getenv('SQS_DLQ_URL', '')  # Dead Letter Queue
 HEALTH_CHECK_INTERVAL = int(os.getenv('HEALTH_CHECK_INTERVAL', '300'))  # 5 minutes
 CRAWLER_NODES = os.getenv('CRAWLER_NODES', '').split(',')  # List of crawler nodes
 INDEXER_NODES = os.getenv('INDEXER_NODES', '').split(',')  # List of indexer nodes
-MAX_RETRIES = int(os.getenv('MAX_RETRIES', '3'))
 
 logger.info(f"Using SQS Queue URL: {SQS_QUEUE_URL}")
 logger.info(f"Using AWS Region: {AWS_REGION}")
@@ -49,7 +49,6 @@ class MasterNode:
         self.stats = {
             'urls_sent': 0,
             'urls_failed': 0,
-            'message_retries': 0,
             'health_checks': 0,
             'start_time': datetime.now().isoformat()
         }
@@ -127,15 +126,7 @@ class MasterNode:
         try:
             url_queue_attrs = self.get_queue_attributes(SQS_URLS_QUEUE)
             url_queue_size = int(url_queue_attrs['ApproximateNumberOfMessages'])
-            url_queue_in_flight = int(url_queue_attrs['ApproximateNumberOfMessagesNotVisible'])
-            url_queue_delayed = int(url_queue_attrs['ApproximateNumberOfMessagesDelayed'])
-            logger.info(f"URL queue has {url_queue_size} visible, {url_queue_in_flight} in-flight, {url_queue_delayed} delayed messages")
-            
-            # Check for queue health issues
-            if url_queue_in_flight > 0 and url_queue_size > 0:
-                url_health_ratio = url_queue_in_flight / (url_queue_in_flight + url_queue_size)
-                if url_health_ratio > 0.8:  # 80% of messages are in-flight
-                    health_issues.append(f"URL queue has high in-flight ratio: {url_health_ratio:.2f}")
+            logger.info(f"URL queue has {url_queue_size} messages")
         except Exception as e:
             health_issues.append(f"URL queue error: {str(e)}")
         
@@ -143,15 +134,7 @@ class MasterNode:
         try:
             content_queue_attrs = self.get_queue_attributes(SQS_QUEUE_URL)
             content_queue_size = int(content_queue_attrs['ApproximateNumberOfMessages'])
-            content_queue_in_flight = int(content_queue_attrs['ApproximateNumberOfMessagesNotVisible'])
-            content_queue_delayed = int(content_queue_attrs['ApproximateNumberOfMessagesDelayed'])
-            logger.info(f"Content queue has {content_queue_size} visible, {content_queue_in_flight} in-flight, {content_queue_delayed} delayed messages")
-            
-            # Check for queue health issues
-            if content_queue_in_flight > 0 and content_queue_size > 0:
-                content_health_ratio = content_queue_in_flight / (content_queue_in_flight + content_queue_size)
-                if content_health_ratio > 0.8:  # 80% of messages are in-flight
-                    health_issues.append(f"Content queue has high in-flight ratio: {content_health_ratio:.2f}")
+            logger.info(f"Content queue has {content_queue_size} messages")
         except Exception as e:
             health_issues.append(f"Content queue error: {str(e)}")
             
@@ -217,55 +200,14 @@ class MasterNode:
             "urls_crawled": len(self.crawled_urls),
             "urls_sent": self.stats['urls_sent'],
             "urls_failed": self.stats['urls_failed'],
-            "message_retries": self.stats['message_retries'],
             "urls_rate": round(urls_per_minute, 2),
             "url_queue_size": int(url_queue_attrs['ApproximateNumberOfMessages']),
             "url_queue_in_flight": int(url_queue_attrs['ApproximateNumberOfMessagesNotVisible']),
-            "url_queue_delayed": int(url_queue_attrs['ApproximateNumberOfMessagesDelayed']),
             "content_queue_size": int(content_queue_attrs['ApproximateNumberOfMessages']),
             "content_queue_in_flight": int(content_queue_attrs['ApproximateNumberOfMessagesNotVisible']),
-            "content_queue_delayed": int(content_queue_attrs['ApproximateNumberOfMessagesDelayed']),
             "node_statuses": self.node_statuses,
             "last_health_check": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.last_health_check))
         }
-
-    def handle_failed_message(self, message, error):
-        """Process failed messages by marking and reinserting"""
-        try:
-            # Parse the original message
-            if isinstance(message['Body'], str):
-                body = json.loads(message['Body'])
-            else:
-                body = message['Body']
-                
-            # Add error information and retry count
-            if 'error_count' not in body:
-                body['error_count'] = 1
-            else:
-                body['error_count'] += 1
-                
-            body['last_error'] = str(error)
-            body['last_retry'] = datetime.now().isoformat()
-            
-            # If max retries not exceeded, send back to original queue
-            if body['error_count'] <= MAX_RETRIES:
-                target_queue = SQS_URLS_QUEUE if body.get('message_type') == 'URL_TO_CRAWL' else SQS_QUEUE_URL
-                delay_seconds = min(body['error_count'] * 60, 900)  # Backoff with delay, max 15 minutes
-                
-                sqs_client.send_message(
-                    QueueUrl=target_queue,
-                    MessageBody=json.dumps(body),
-                    DelaySeconds=delay_seconds
-                )
-                logger.info(f"Requeued message for retry {body['error_count']}/{MAX_RETRIES} with delay {delay_seconds}s")
-                self.stats['message_retries'] += 1
-                return True
-            else:
-                logger.error(f"Message failed after {MAX_RETRIES} retries, dropping: {body}")
-                return False
-        except Exception as e:
-            logger.error(f"Error handling failed message: {str(e)}")
-            return False
 
     def send_urls_to_queue(self):
         """Send URLs to the queue with message type tags"""
@@ -306,74 +248,37 @@ def master_process():
     # Initial health check
     master.perform_health_check()
     
-    # Main control loop
     while True:
         try:
-            # Print status periodically
-            if datetime.now() - master.last_status_print > master.status_print_interval:
-                master.print_status()
-                master.last_status_print = datetime.now()
+            current_time = datetime.now()
             
-            # Send URLs to the queue
-            if master.urls_to_crawl:
-                master.send_urls_to_queue()
+            # Print status periodically
+            if current_time - master.last_status_print > master.status_print_interval:
+                master.print_status()
+                master.last_status_print = current_time
             
             # Perform health check periodically
-            if datetime.now() - datetime.fromtimestamp(master.last_health_check) > master.health_check_interval:
+            if current_time - datetime.fromtimestamp(master.last_health_check) > master.health_check_interval:
                 master.perform_health_check()
             
-            # Pause to prevent high CPU usage
-            time.sleep(5)
+            # Send URLs to queue
+            urls_sent = master.send_urls_to_queue()
+            
+            # Adaptive sleep - sleep longer if no URLs were sent
+            if urls_sent == 0:
+                # Add some jitter to prevent thundering herd problem
+                time.sleep(random.uniform(2, 5))
+            else:
+                time.sleep(1)  # Small delay to prevent CPU overuse
             
         except Exception as e:
             logger.error(f"Error in master process: {str(e)}")
-            time.sleep(5)
+            time.sleep(5)  # Wait before retrying
 
-# Flask app for API endpoints
-from flask import Flask, jsonify, request
-
-app = Flask(__name__)
-master = MasterNode()
-master.initialize_seed_urls()
-
-@app.route('/status')
 def status_api():
-    return jsonify(master.get_status())
+    """This function would be called by an API endpoint to get system status"""
+    master = MasterNode()
+    return master.get_status()
 
-@app.route('/health')
-def health_api():
-    is_healthy = master.perform_health_check()
-    return jsonify({
-        'status': 'healthy' if is_healthy else 'degraded',
-        'components': master.node_statuses,
-        'timestamp': datetime.now().isoformat()
-    })
-
-@app.route('/add_urls', methods=['POST'])
-def add_urls_api():
-    data = request.get_json()
-    if not data or 'urls' not in data:
-        return jsonify({'error': 'No URLs provided', 'success': False}), 400
-    
-    urls = data['urls']
-    if not isinstance(urls, list):
-        return jsonify({'error': 'URLs must be a list', 'success': False}), 400
-    
-    master.urls_to_crawl.update(urls)
-    urls_added = master.send_urls_to_queue()
-    
-    return jsonify({
-        'success': True,
-        'urls_added': urls_added,
-        'remaining_urls': len(master.urls_to_crawl)
-    })
-
-if __name__ == "__main__":
-    # Run in a separate thread so it doesn't block the API
-    import threading
-    master_thread = threading.Thread(target=master_process)
-    master_thread.daemon = True
-    master_thread.start()
-    
-    # Start the API server
-    app.run(host='0.0.0.0', port=5001) 
+if __name__ == '__main__':
+    master_process() 
