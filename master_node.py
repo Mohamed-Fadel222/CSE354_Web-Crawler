@@ -21,6 +21,13 @@ logger.info(f"Using SQS Queue URL: {SQS_QUEUE_URL}")
 logger.info(f"Using AWS Region: {AWS_REGION}")
 sqs_client = boto3.client('sqs', region_name=AWS_REGION)
 
+# Message Tags
+MSG_TAG_INFO = 0       # Regular informational messages
+MSG_TAG_URL = 1        # URL processing messages
+MSG_TAG_CONTENT = 2    # Content processing messages  
+MSG_TAG_WARNING = 99   # Warning messages
+MSG_TAG_ERROR = 999    # Error messages
+
 class MasterNode:
     def __init__(self):
         self.crawled_urls = set()
@@ -44,6 +51,23 @@ class MasterNode:
             urls_queue_size = int(urls_queue_attrs['Attributes']['ApproximateNumberOfMessages'])
             content_queue_size = int(content_queue_attrs['Attributes']['ApproximateNumberOfMessages'])
             
+            # Send status message to content queue
+            status_message = {
+                'tag': MSG_TAG_INFO,
+                'message_type': 'system_status',
+                'timestamp': datetime.now().isoformat(),
+                'urls_queue_size': urls_queue_size,
+                'content_queue_size': content_queue_size,
+                'urls_crawled': len(self.crawled_urls),
+                'uptime_seconds': (datetime.now() - self.start_time).total_seconds()
+            }
+            
+            # Send the status message to the queue for webapp to consume
+            sqs_client.send_message(
+                QueueUrl=SQS_QUEUE_URL,
+                MessageBody=json.dumps(status_message)
+            )
+            
             logger.info("\n=== System Status ===")
             logger.info(f"URLs Queue Size: {urls_queue_size}")
             logger.info(f"Content Queue Size: {content_queue_size}")
@@ -52,6 +76,39 @@ class MasterNode:
             logger.info("==================\n")
         except Exception as e:
             logger.error(f"Error getting queue status: {str(e)}")
+            
+    def add_url_to_queue(self, url, source="master_node"):
+        """Add a URL to the crawler queue with proper tagging"""
+        try:
+            sqs_client.send_message(
+                QueueUrl=SQS_URLS_QUEUE,
+                MessageBody=json.dumps({
+                    'tag': MSG_TAG_URL,
+                    'url': url,
+                    'source': source,
+                    'timestamp': datetime.now().isoformat()
+                })
+            )
+            logger.info(f"Added URL to queue: {url}")
+            return True
+        except Exception as e:
+            logger.error(f"Error adding URL to queue: {str(e)}")
+            
+            # Send error message
+            try:
+                sqs_client.send_message(
+                    QueueUrl=SQS_QUEUE_URL,
+                    MessageBody=json.dumps({
+                        'tag': MSG_TAG_ERROR,
+                        'error': f"Failed to add URL to queue: {str(e)}",
+                        'url': url,
+                        'timestamp': datetime.now().isoformat()
+                    })
+                )
+            except:
+                pass
+                
+            return False
 
 def master_process():
     logger.info("Master node started")
@@ -71,6 +128,19 @@ def master_process():
             
         except Exception as e:
             logger.error(f"Error in master process: {str(e)}")
+            # Send error message to queue
+            try:
+                sqs_client.send_message(
+                    QueueUrl=SQS_QUEUE_URL,
+                    MessageBody=json.dumps({
+                        'tag': MSG_TAG_ERROR,
+                        'error': f"Master node error: {str(e)}",
+                        'timestamp': datetime.now().isoformat()
+                    })
+                )
+            except Exception as send_err:
+                logger.error(f"Error sending error message: {str(send_err)}")
+                
             time.sleep(5)  # Wait before retrying
 
 if __name__ == '__main__':

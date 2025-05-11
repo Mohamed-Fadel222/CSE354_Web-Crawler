@@ -27,6 +27,22 @@ logger.info(f"SQS Content Queue: {SQS_QUEUE_URL}")
 logger.info(f"SQS URLs Queue: {SQS_URLS_QUEUE}")
 logger.info(f"S3 Bucket: {S3_BUCKET_NAME}")
 
+# Message Tags
+MSG_TAG_INFO = 0       # Regular informational messages
+MSG_TAG_URL = 1        # URL processing messages
+MSG_TAG_CONTENT = 2    # Content processing messages  
+MSG_TAG_WARNING = 99   # Warning messages
+MSG_TAG_ERROR = 999    # Error messages
+
+# Map tags to human-readable names
+TAG_NAMES = {
+    MSG_TAG_INFO: "Info",
+    MSG_TAG_URL: "URL",
+    MSG_TAG_CONTENT: "Content",
+    MSG_TAG_WARNING: "Warning",
+    MSG_TAG_ERROR: "Error"
+}
+
 # Initialize AWS clients
 sqs_client = boto3.client('sqs', region_name=AWS_REGION)
 s3_client = boto3.client('s3', region_name=AWS_REGION)
@@ -51,12 +67,17 @@ def add_url():
     url = request.form.get('url')
     if url:
         try:
-            # Send URL to the queue
+            # Send URL to the queue with proper tag
             sqs_client.send_message(
                 QueueUrl=SQS_URLS_QUEUE,
-                MessageBody=json.dumps({'url': url})
+                MessageBody=json.dumps({
+                    'tag': MSG_TAG_URL,
+                    'url': url,
+                    'source': 'webapp',
+                    'timestamp': time.time()
+                })
             )
-            logger.info(f"Added URL to queue: {url}")
+            logger.info(f"Added URL to queue: {url} with tag {MSG_TAG_URL}")
             return jsonify({"status": "success", "message": f"Added {url} to crawl queue"})
         except Exception as e:
             logger.error(f"Error adding URL: {str(e)}")
@@ -90,12 +111,18 @@ def refresh_url_cache():
                     receipt = message['ReceiptHandle']
                     body = json.loads(message['Body'])
                     
+                    # Get message tag
+                    tag = body.get('tag', MSG_TAG_CONTENT)  # Default to content
+                    tag_name = TAG_NAMES.get(tag, "Unknown")
+                    
                     if 'url' in body:
                         new_cache.append({
                             'url': body['url'],
-                            'source': 'SQS Content Queue'
+                            'source': 'SQS Content Queue',
+                            'tag': tag,
+                            'tag_name': tag_name
                         })
-                        logger.info(f"Found URL in SQS: {body['url']}")
+                        logger.info(f"Found URL in SQS: {body['url']} (Tag: {tag_name})")
                     
                     # Return message to queue
                     sqs_client.change_message_visibility(
@@ -148,11 +175,17 @@ def refresh_url_cache():
                         try:
                             data = json.loads(content)
                             if isinstance(data, dict) and 'url' in data:
+                                # Get tag if available
+                                tag = data.get('tag', MSG_TAG_CONTENT)
+                                tag_name = TAG_NAMES.get(tag, "Unknown")
+                                
                                 new_cache.append({
                                     'url': data['url'],
-                                    'source': f'S3:{key}'
+                                    'source': f'S3:{key}',
+                                    'tag': tag,
+                                    'tag_name': tag_name
                                 })
-                                logger.info(f"Found URL in S3 JSON: {data['url']}")
+                                logger.info(f"Found URL in S3 JSON: {data['url']} (Tag: {tag_name})")
                         except json.JSONDecodeError:
                             # Not JSON, look for URLs in the text
                             if 'http://' in content or 'https://' in content:
@@ -164,7 +197,9 @@ def refresh_url_cache():
                                         if ' ' not in url_candidate and url_candidate.startswith('http'):
                                             new_cache.append({
                                                 'url': url_candidate,
-                                                'source': f'S3:{key} (text)'
+                                                'source': f'S3:{key} (text)',
+                                                'tag': MSG_TAG_URL,
+                                                'tag_name': TAG_NAMES[MSG_TAG_URL]
                                             })
                                             logger.info(f"Found URL in S3 text: {url_candidate}")
                                             break
@@ -189,12 +224,18 @@ def refresh_url_cache():
                     receipt = message['ReceiptHandle']
                     body = json.loads(message['Body'])
                     
+                    # Get message tag
+                    tag = body.get('tag', MSG_TAG_URL)  # Default to URL tag
+                    tag_name = TAG_NAMES.get(tag, "Unknown")
+                    
                     if 'url' in body:
                         new_cache.append({
                             'url': body['url'],
-                            'source': 'SQS URLs Queue'
+                            'source': 'SQS URLs Queue',
+                            'tag': tag,
+                            'tag_name': tag_name
                         })
-                        logger.info(f"Found URL in URLs queue: {body['url']}")
+                        logger.info(f"Found URL in URLs queue: {body['url']} (Tag: {tag_name})")
                     
                     # Return message to queue
                     sqs_client.change_message_visibility(
@@ -266,21 +307,34 @@ def search():
                         )
                         document = json.loads(doc_response['Body'].read().decode('utf-8'))
                         
+                        # Get tag and tag name
+                        tag = document.get('tag', MSG_TAG_CONTENT)
+                        tag_name = TAG_NAMES.get(tag, "Unknown")
+                        
                         results.append({
                             'url': document['url'],
                             'content': document.get('content', ''),
                             'source': 'keyword_search',
-                            'relevance': score
+                            'relevance': score,
+                            'tag': tag,
+                            'tag_name': tag_name
                         })
-                        logger.info(f"Found document with URL: {document['url']} (relevance: {score})")
+                        logger.info(f"Found document with URL: {document['url']} (relevance: {score}, tag: {tag_name})")
                     except Exception as e:
                         # If we can't get the content, at least return the URL
                         logger.warning(f"Error retrieving document {doc_id}: {str(e)}")
+                        
+                        # Get tag if available in master index
+                        tag = master_index["documents"][doc_id].get('tag', MSG_TAG_CONTENT)
+                        tag_name = TAG_NAMES.get(tag, "Unknown")
+                        
                         results.append({
                             'url': master_index["documents"][doc_id]["url"],
                             'content': '',
                             'source': 'master_index_only',
-                            'relevance': score
+                            'relevance': score,
+                            'tag': tag,
+                            'tag_name': tag_name
                         })
             
             logger.info(f"Fast keyword search found {len(results)} top-ranking results")
@@ -303,13 +357,20 @@ def search():
                         if content and query in content:
                             # Simple relevance: frequency of query in content
                             relevance = content.count(query)
+                            
+                            # Get tag if available
+                            tag = document.get('tag', MSG_TAG_CONTENT)
+                            tag_name = TAG_NAMES.get(tag, "Unknown")
+                            
                             results.append({
                                 'url': document['url'],
                                 'content': document.get('content', ''),
                                 'source': 'full_content_search',
-                                'relevance': relevance
+                                'relevance': relevance,
+                                'tag': tag,
+                                'tag_name': tag_name
                             })
-                            logger.info(f"Full content match in document: {document['url']} (relevance: {relevance})")
+                            logger.info(f"Full content match in document: {document['url']} (relevance: {relevance}, tag: {tag_name})")
                     except Exception as e:
                         logger.warning(f"Error loading document {doc_id}: {str(e)}")
                         continue
@@ -349,12 +410,18 @@ def search():
                             document = json.loads(content)
                             if 'url' in document and 'content' in document:
                                 if query.lower() in document['content'].lower():
+                                    # Get tag if available
+                                    tag = document.get('tag', MSG_TAG_CONTENT)
+                                    tag_name = TAG_NAMES.get(tag, "Unknown")
+                                    
                                     results.append({
                                         'url': document['url'],
                                         'content': document.get('content', ''),
-                                        'source': 'direct_s3_search'
+                                        'source': 'direct_s3_search',
+                                        'tag': tag,
+                                        'tag_name': tag_name
                                     })
-                                    logger.info(f"Direct search match: {document['url']}")
+                                    logger.info(f"Direct search match: {document['url']} (tag: {tag_name})")
                         except json.JSONDecodeError:
                             continue
                     except Exception as e:
@@ -389,19 +456,23 @@ def search():
                     if query.lower() in content.lower():
                         # Try to extract URL from content
                         url = None
+                        tag = MSG_TAG_INFO  # Default tag
                         
                         # Try as JSON first
                         try:
                             data = json.loads(content)
                             if isinstance(data, dict) and 'url' in data:
                                 url = data['url']
+                                tag = data.get('tag', MSG_TAG_CONTENT)
                                 # If this is a structured document, we want to include full content
                                 results.append({
                                     'url': url,
                                     'content': data.get('content', content[:1000]),
-                                    'source': f'fallback_json:{key}'
+                                    'source': f'fallback_json:{key}',
+                                    'tag': tag,
+                                    'tag_name': TAG_NAMES.get(tag, "Unknown")
                                 })
-                                logger.info(f"Fallback JSON search match: {url}")
+                                logger.info(f"Fallback JSON search match: {url} (tag: {TAG_NAMES.get(tag, 'Unknown')})")
                                 continue
                         except:
                             pass
@@ -430,9 +501,11 @@ def search():
                             results.append({
                                 'url': url,
                                 'content': content[:1000],
-                                'source': f'fallback_text:{key}'
+                                'source': f'fallback_text:{key}',
+                                'tag': MSG_TAG_URL,
+                                'tag_name': TAG_NAMES[MSG_TAG_URL]
                             })
-                            logger.info(f"Fallback text search match: {url}")
+                            logger.info(f"Fallback text search match: {url} (tag: {TAG_NAMES[MSG_TAG_URL]})")
                         
                         # Stop at 10 results
                         if len(results) >= 10:
@@ -455,6 +528,24 @@ def search():
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
     
     return response
+
+@app.route('/list-urls')
+def list_urls():
+    """List all available URLs from cache for direct access"""
+    urls = refresh_url_cache()
+    return jsonify({
+        "urls": [
+            {
+                "url": entry['url'],
+                "tag": entry.get('tag', 0),
+                "tag_name": entry.get('tag_name', 'Unknown'),
+                "source": entry.get('source', 'Unknown')
+            } 
+            for entry in urls
+        ],
+        "count": len(urls),
+        "tag_mapping": TAG_NAMES  # Include tag mapping for UI display
+    })
 
 @app.route('/status')
 def status():
@@ -505,6 +596,69 @@ def status():
             s3_status = "unavailable"
             indexed_docs = 0
             
+        # Get recent message tags from queues
+        message_tags_count = {
+            str(MSG_TAG_INFO): 0,
+            str(MSG_TAG_URL): 0,
+            str(MSG_TAG_CONTENT): 0,
+            str(MSG_TAG_WARNING): 0,
+            str(MSG_TAG_ERROR): 0
+        }
+        
+        # Check URL queue for message tags
+        try:
+            response = sqs_client.receive_message(
+                QueueUrl=SQS_URLS_QUEUE,
+                MaxNumberOfMessages=10,
+                VisibilityTimeout=5,
+                WaitTimeSeconds=1
+            )
+            
+            if 'Messages' in response:
+                for message in response['Messages']:
+                    try:
+                        body = json.loads(message['Body'])
+                        tag = str(body.get('tag', MSG_TAG_URL))  # Default to URL tag
+                        message_tags_count[tag] = message_tags_count.get(tag, 0) + 1
+                        
+                        # Return message to queue
+                        sqs_client.change_message_visibility(
+                            QueueUrl=SQS_URLS_QUEUE,
+                            ReceiptHandle=message['ReceiptHandle'],
+                            VisibilityTimeout=0
+                        )
+                    except:
+                        pass
+        except:
+            pass
+        
+        # Check content queue for message tags
+        try:
+            response = sqs_client.receive_message(
+                QueueUrl=SQS_QUEUE_URL,
+                MaxNumberOfMessages=10,
+                VisibilityTimeout=5,
+                WaitTimeSeconds=1
+            )
+            
+            if 'Messages' in response:
+                for message in response['Messages']:
+                    try:
+                        body = json.loads(message['Body'])
+                        tag = str(body.get('tag', MSG_TAG_CONTENT))  # Default to content tag
+                        message_tags_count[tag] = message_tags_count.get(tag, 0) + 1
+                        
+                        # Return message to queue
+                        sqs_client.change_message_visibility(
+                            QueueUrl=SQS_QUEUE_URL,
+                            ReceiptHandle=message['ReceiptHandle'],
+                            VisibilityTimeout=0
+                        )
+                    except:
+                        pass
+        except:
+            pass
+            
         status_data = {
             "urls_queue_size": urls_queue_size,
             "content_queue_size": content_queue_size,
@@ -514,6 +668,8 @@ def status():
             "content_queue_inflight": content_queue_inflight,
             "s3_status": s3_status,
             "indexed_docs": indexed_docs,
+            "message_tags": message_tags_count,
+            "tag_names": TAG_NAMES,
             "timestamp": time.time()
         }
         
@@ -527,15 +683,6 @@ def status():
         logger.error(f"Error getting status: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-@app.route('/list-urls')
-def list_urls():
-    """List all available URLs from cache for direct access"""
-    urls = refresh_url_cache()
-    return jsonify({
-        "urls": [entry['url'] for entry in urls],
-        "count": len(urls)
-    })
-
 # DIAGNOSTIC AND TEST ENDPOINTS
 
 @app.route('/test/insert-example', methods=['GET'])
@@ -545,15 +692,22 @@ def insert_example():
         # 1. Add example.com to the URLs queue
         url_response = sqs_client.send_message(
             QueueUrl=SQS_URLS_QUEUE,
-            MessageBody=json.dumps({'url': 'https://example.com/'})
+            MessageBody=json.dumps({
+                'tag': MSG_TAG_URL,
+                'url': 'https://example.com/',
+                'source': 'test_insert',
+                'timestamp': time.time()
+            })
         )
         
         # 2. Add example content directly to the content queue
         content_response = sqs_client.send_message(
             QueueUrl=SQS_QUEUE_URL,
             MessageBody=json.dumps({
+                'tag': MSG_TAG_CONTENT,
                 'url': 'https://example.com/',
-                'content': 'Example Domain. This domain is for use in illustrative examples.'
+                'content': 'Example Domain. This domain is for use in illustrative examples.',
+                'timestamp': time.time()
             })
         )
         
@@ -562,16 +716,42 @@ def insert_example():
             Bucket=S3_BUCKET_NAME,
             Key='test-example.json',
             Body=json.dumps({
+                'tag': MSG_TAG_CONTENT,
                 'url': 'https://example.com/',
-                'content': 'Example Domain test file in S3.'
+                'content': 'Example Domain test file in S3.',
+                'timestamp': time.time()
+            })
+        )
+        
+        # 4. Add an info message
+        info_response = sqs_client.send_message(
+            QueueUrl=SQS_QUEUE_URL,
+            MessageBody=json.dumps({
+                'tag': MSG_TAG_INFO,
+                'message': 'Test info message',
+                'timestamp': time.time()
+            })
+        )
+        
+        # 5. Add a warning message
+        warning_response = sqs_client.send_message(
+            QueueUrl=SQS_QUEUE_URL,
+            MessageBody=json.dumps({
+                'tag': MSG_TAG_WARNING,
+                'message': 'Test warning message',
+                'url': 'https://example.com/warning',
+                'timestamp': time.time()
             })
         )
         
         return jsonify({
             "status": "success",
-            "message": "Test data inserted",
+            "message": "Test data inserted with tags",
             "url_message_id": url_response.get('MessageId'),
-            "content_message_id": content_response.get('MessageId')
+            "content_message_id": content_response.get('MessageId'),
+            "info_message_id": info_response.get('MessageId'),
+            "warning_message_id": warning_response.get('MessageId'),
+            "tag_mapping": TAG_NAMES
         })
     except Exception as e:
         logger.error(f"Error inserting test data: {str(e)}")

@@ -31,6 +31,13 @@ logger.info(f"Using S3 Bucket: {S3_BUCKET_NAME}")
 sqs_client = boto3.client('sqs', region_name=AWS_REGION)
 s3_client = boto3.client('s3', region_name=AWS_REGION)
 
+# Message Tags
+MSG_TAG_INFO = 0       # Regular informational messages
+MSG_TAG_URL = 1        # URL processing messages
+MSG_TAG_CONTENT = 2    # Content processing messages  
+MSG_TAG_WARNING = 99   # Warning messages
+MSG_TAG_ERROR = 999    # Error messages
+
 class Indexer:
     def __init__(self):
         self.schema = Schema(
@@ -149,7 +156,8 @@ class Indexer:
                 "content": content[:5000],  # Store more content (up to 5000 chars)
                 "content_length": len(content),
                 "timestamp": datetime.datetime.now().isoformat(),
-                "id": doc_id
+                "id": doc_id,
+                "tag": MSG_TAG_CONTENT  # Add tag for content
             }
             
             # Extract keywords for faster searching
@@ -167,7 +175,8 @@ class Indexer:
             # 3. Update master index
             self.master_index["documents"][doc_id] = {
                 "url": url,
-                "timestamp": document_data["timestamp"]
+                "timestamp": document_data["timestamp"],
+                "tag": MSG_TAG_CONTENT
             }
             
             # Add keyword mappings for faster searching
@@ -243,11 +252,30 @@ class Indexer:
     def process_sqs_message(self, message):
         try:
             body = json.loads(message['Body'])
-            url = body['url']
-            content = body['content']
+            url = body.get('url')
+            content = body.get('content')
+            tag = body.get('tag', MSG_TAG_CONTENT)  # Default to content tag if not specified
             
-            logger.info(f"Processing content from {url}")
-            self.index_document(url, content)
+            if not url:
+                logger.warning(f"Message missing URL field: {body}")
+                return
+                
+            # Handle different message types based on tag
+            if tag == MSG_TAG_CONTENT:
+                if content:
+                    logger.info(f"Processing content from {url} (tag: {tag})")
+                    self.index_document(url, content)
+                else:
+                    logger.warning(f"Content message missing content field: {url}")
+            elif tag == MSG_TAG_ERROR:
+                # Log error messages but don't index them
+                error = body.get('error', 'Unknown error')
+                logger.error(f"Received error message: {error} for URL: {url}")
+            elif tag == MSG_TAG_INFO:
+                # Just log informational messages
+                logger.info(f"Received info message for URL: {url}")
+            else:
+                logger.warning(f"Received message with unknown tag {tag} for URL: {url}")
             
             # Delete the message from the queue
             sqs_client.delete_message(

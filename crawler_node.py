@@ -33,6 +33,13 @@ logger.info(f"Using SQS Queue URL: {SQS_QUEUE_URL}")
 logger.info(f"Using AWS Region: {AWS_REGION}")
 sqs_client = boto3.client('sqs', region_name=AWS_REGION)
 
+# Message Tags
+MSG_TAG_INFO = 0       # Regular informational messages
+MSG_TAG_URL = 1        # URL processing messages
+MSG_TAG_CONTENT = 2    # Content processing messages  
+MSG_TAG_WARNING = 99   # Warning messages
+MSG_TAG_ERROR = 999    # Error messages
+
 class Crawler:
     def __init__(self):
         self.headers = {
@@ -188,8 +195,10 @@ class Crawler:
             if extracted_text:
                 # Send content to indexer queue
                 message_body = {
+                    'tag': MSG_TAG_CONTENT,  # Tag for content messages
                     'url': url,
                     'content': extracted_text[:5000],  # Increased content size
+                    'timestamp': time.time()
                 }
                 
                 try:
@@ -213,7 +222,12 @@ class Crawler:
                         try:
                             response = sqs_client.send_message(
                                 QueueUrl=SQS_URLS_QUEUE,
-                                MessageBody=json.dumps({'url': new_url})
+                                MessageBody=json.dumps({
+                                    'tag': MSG_TAG_URL,  # Tag for URL messages
+                                    'url': new_url,
+                                    'source_url': url,
+                                    'timestamp': time.time()
+                                })
                             )
                             urls_queued += 1
                             logger.info(f"[Crawler-{self.crawler_id}] Queued new URL for crawling: {new_url} (MessageId: {response.get('MessageId')})")
@@ -274,8 +288,9 @@ def crawler_process():
                     try:
                         body = json.loads(message['Body'])
                         url = body['url']
+                        tag = body.get('tag', MSG_TAG_URL)  # Default to URL tag if not specified
                         
-                        logger.info(f"[Crawler-{crawler.crawler_id}] Received URL from queue: {url} (MessageId: {message_id})")
+                        logger.info(f"[Crawler-{crawler.crawler_id}] Received URL from queue: {url} (MessageId: {message_id}, Tag: {tag})")
                         
                         # Process the URL (fetches content and queues discovered URLs)
                         crawler.process_url(url)
@@ -288,6 +303,20 @@ def crawler_process():
                         logger.info(f"[Crawler-{crawler.crawler_id}] Successfully processed and deleted message for {url}")
                         
                     except json.JSONDecodeError as e:
+                        # Send error message to queue
+                        try:
+                            sqs_client.send_message(
+                                QueueUrl=SQS_QUEUE_URL,
+                                MessageBody=json.dumps({
+                                    'tag': MSG_TAG_ERROR,
+                                    'error': f"JSON decode error: {str(e)}",
+                                    'message_id': message_id,
+                                    'timestamp': time.time()
+                                })
+                            )
+                        except Exception as send_err:
+                            logger.error(f"[Crawler-{crawler.crawler_id}] Error sending error message: {str(send_err)}")
+                            
                         logger.error(f"[Crawler-{crawler.crawler_id}] Error decoding message: {str(e)}")
                         # Delete malformed messages
                         sqs_client.delete_message(
@@ -295,6 +324,21 @@ def crawler_process():
                             ReceiptHandle=receipt_handle
                         )
                     except Exception as e:
+                        # Send error message to queue
+                        try:
+                            sqs_client.send_message(
+                                QueueUrl=SQS_QUEUE_URL,
+                                MessageBody=json.dumps({
+                                    'tag': MSG_TAG_ERROR,
+                                    'error': f"Processing error: {str(e)}",
+                                    'url': body.get('url', 'unknown'),
+                                    'message_id': message_id,
+                                    'timestamp': time.time()
+                                })
+                            )
+                        except Exception as send_err:
+                            logger.error(f"[Crawler-{crawler.crawler_id}] Error sending error message: {str(send_err)}")
+                            
                         logger.error(f"[Crawler-{crawler.crawler_id}] Error processing message: {str(e)}")
                         # Return the message to the queue for retry
                         try:
