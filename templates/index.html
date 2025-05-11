@@ -120,25 +120,8 @@
             fetch('/status')
                 .then(response => response.json())
                 .then(data => {
-                    // Update URLs queue
-                    const urlsQueueEl = document.getElementById('urls-queue');
-                    urlsQueueEl.innerHTML = `
-                        <div class="text-3xl font-bold text-blue-600">${data.urls_queue_size}</div>
-                        <div class="text-sm text-blue-500">
-                            <span title="Visible messages">${data.urls_queue_visible} visible</span> + 
-                            <span title="In flight messages">${data.urls_queue_inflight} processing</span>
-                        </div>
-                    `;
-                    
-                    // Update content queue
-                    const contentQueueEl = document.getElementById('content-queue');
-                    contentQueueEl.innerHTML = `
-                        <div class="text-3xl font-bold text-green-600">${data.content_queue_size}</div>
-                        <div class="text-sm text-green-500">
-                            <span title="Visible messages">${data.content_queue_visible} visible</span> + 
-                            <span title="In flight messages">${data.content_queue_inflight} processing</span>
-                        </div>
-                    `;
+                    document.getElementById('urls-queue').textContent = data.urls_queue_size;
+                    document.getElementById('content-queue').textContent = data.content_queue_size;
                     
                     // Update S3 status
                     const s3StatusElement = document.getElementById('s3-status');
@@ -174,10 +157,8 @@
                 
                 if (data.status === 'success') {
                     document.getElementById('url-input').value = '';
-                    // Update status after adding URL - multiple times with delay
-                    updateStatus(); // Immediate update
-                    setTimeout(updateStatus, 1000); // 1 second later
-                    setTimeout(updateStatus, 3000); // 3 seconds later
+                    // Update status after adding URL
+                    setTimeout(updateStatus, 1000);
                 }
             })
             .catch(error => {
@@ -220,7 +201,7 @@
                             let resultHTML = '';
                             
                             // Handle S3 keys differently
-                            if (typeof url === 'string' && url.startsWith('S3:')) {
+                            if (url.startsWith('S3:')) {
                                 resultHTML += `<div class="mb-2"><span class="text-purple-600 font-medium text-lg">${url}</span></div>`;
                             } else {
                                 resultHTML += `<div class="mb-2"><a href="${url}" target="_blank" class="text-primary font-medium text-lg hover:underline">${url}</a></div>`;
@@ -247,9 +228,9 @@
                 });
         });
 
-        // Update status initially and every 3 seconds
+        // Update status initially and every 5 seconds
         updateStatus();
-        setInterval(updateStatus, 3000);
+        setInterval(updateStatus, 5000);
     </script>
 </body>
 </html> 
