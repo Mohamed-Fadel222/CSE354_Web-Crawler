@@ -153,6 +153,10 @@
         let tagChart;
         let queueChart;
         
+        // Status refresh interval (in milliseconds)
+        const STATUS_REFRESH_INTERVAL = 2000; // 2 seconds
+        const URLS_REFRESH_INTERVAL = 5000;   // 5 seconds
+        
         // Function to format tag display
         function formatTag(tag) {
             // Convert tag to string to ensure it works with string or numeric values
@@ -378,9 +382,9 @@
             fetchStatus();
             fetchUrls();
             
-            // Set up polling for updates
-            setInterval(fetchStatus, 10000); // Update status every 10 seconds
-            setInterval(fetchUrls, 30000);   // Update URLs every 30 seconds
+            // Set up polling for updates with faster refresh rates
+            setInterval(fetchStatus, STATUS_REFRESH_INTERVAL); // Update status every 2 seconds
+            setInterval(fetchUrls, URLS_REFRESH_INTERVAL);   // Update URLs every 5 seconds
         });
     </script>
 </body>

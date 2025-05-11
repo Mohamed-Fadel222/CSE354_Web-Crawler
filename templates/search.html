@@ -5,10 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Search Results</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         body {
             padding-top: 20px;
             padding-bottom: 40px;
+            background-color: #f8f9fa;
         }
         .tag-0 { background-color: #6c757d; color: white; } /* Info */
         .tag-1 { background-color: #007bff; color: white; } /* URL */
@@ -31,8 +33,10 @@
         .search-result {
             margin-bottom: 20px;
             padding: 15px;
-            border: 1px solid #ddd;
-            border-radius: 5px;
+            border: 1px solid rgba(0, 0, 0, 0.05);
+            border-radius: 8px;
+            box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+            background-color: #fff;
         }
         .search-content {
             max-height: 200px;
@@ -41,28 +45,63 @@
             padding: 10px;
             background-color: #f9f9f9;
             margin-top: 10px;
+            border-radius: 4px;
+        }
+        .card {
+            box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+            margin-bottom: 1rem;
+            border: none;
+            border-radius: 0.5rem;
+        }
+        .card-header {
+            background-color: #fff;
+            border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+            font-weight: 600;
+            padding: 1rem;
+            border-top-left-radius: 0.5rem !important;
+            border-top-right-radius: 0.5rem !important;
+        }
+        .card-body {
+            padding: 1.25rem;
+        }
+        .navbar {
+            border-radius: 0.5rem;
+            box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+        }
+        .btn {
+            border-radius: 0.3rem;
+            font-weight: 500;
+        }
+        pre {
+            white-space: pre-wrap;
+            font-size: 0.875rem;
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1 class="mb-4">Search Results</h1>
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1>Search Results</h1>
+        </div>
         
         <div class="row mb-4">
             <div class="col-12">
                 <nav class="navbar navbar-expand-lg navbar-light bg-light mb-3">
                     <div class="container-fluid">
-                        <span class="navbar-brand">Navigation</span>
-                        <div class="collapse navbar-collapse">
+                        <span class="navbar-brand"><i class="fas fa-sitemap me-2"></i>Navigation</span>
+                        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                            <span class="navbar-toggler-icon"></span>
+                        </button>
+                        <div class="collapse navbar-collapse" id="navbarNav">
                             <ul class="navbar-nav">
                                 <li class="nav-item">
-                                    <a class="nav-link" href="/">Dashboard</a>
+                                    <a class="nav-link" href="/"><i class="fas fa-home me-1"></i>Dashboard</a>
                                 </li>
                                 <li class="nav-item">
-                                    <a class="nav-link" href="/monitor">System Monitor</a>
+                                    <a class="nav-link" href="/monitor"><i class="fas fa-chart-line me-1"></i>System Monitor</a>
                                 </li>
                                 <li class="nav-item">
-                                    <a class="nav-link active" href="/search-page">Search Page</a>
+                                    <a class="nav-link active" href="/search-page"><i class="fas fa-search me-1"></i>Search Page</a>
                                 </li>
                             </ul>
                         </div>
@@ -74,12 +113,15 @@
         <div class="row mb-4">
             <div class="col-md-12">
                 <div class="card">
-                    <div class="card-header">Search</div>
+                    <div class="card-header">
+                        <i class="fas fa-search me-2"></i>Search
+                    </div>
                     <div class="card-body">
-                        <form id="searchForm" action="/search" method="get">
+                        <form id="searchForm" action="/search-page" method="get">
                             <div class="input-group mb-3">
+                                <span class="input-group-text"><i class="fas fa-search"></i></span>
                                 <input type="text" class="form-control" id="query" name="query" value="{{ query }}" placeholder="Enter search terms" required>
-                                <button type="submit" class="btn btn-primary">Search</button>
+                                <button type="submit" class="btn btn-primary"><i class="fas fa-search me-1"></i>Search</button>
                             </div>
                         </form>
                     </div>
@@ -92,7 +134,7 @@
                 <div class="card">
                     <div class="card-header">
                         <div class="d-flex justify-content-between align-items-center">
-                            <span>Results for "{{ query }}"</span>
+                            <span><i class="fas fa-list-ul me-2"></i>Results for "{{ query }}"</span>
                             <span class="badge bg-primary">{{ results|length }} found</span>
                         </div>
                     </div>
@@ -110,15 +152,17 @@
                                         <pre>{{ result.content }}</pre>
                                     </div>
                                     <div class="mt-2 text-muted">
-                                        Source: {{ result.source }}
+                                        <i class="fas fa-info-circle me-1"></i>Source: {{ result.source }}
                                         {% if result.relevance %}
-                                            | Relevance: {{ result.relevance }}
+                                            | <i class="fas fa-star me-1"></i>Relevance: {{ result.relevance }}
                                         {% endif %}
                                     </div>
                                 </div>
                             {% endfor %}
                         {% else %}
-                            <div class="alert alert-warning">No results found for "{{ query }}"</div>
+                            <div class="alert alert-warning">
+                                <i class="fas fa-exclamation-triangle me-2"></i>No results found for "{{ query }}"
+                            </div>
                         {% endif %}
                     </div>
                 </div>
@@ -127,7 +171,7 @@
         
         <div class="row">
             <div class="col-12">
-                <a href="/" class="btn btn-secondary">Back to Dashboard</a>
+                <a href="/" class="btn btn-secondary"><i class="fas fa-arrow-left me-2"></i>Back to Dashboard</a>
             </div>
         </div>
     </div>
