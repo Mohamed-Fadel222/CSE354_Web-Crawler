@@ -198,3 +198,5 @@ def crawler_process():
 
 if __name__ == '__main__':
     crawler_process()    
+
+    # Start the crawler process
