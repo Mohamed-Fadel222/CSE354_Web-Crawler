@@ -9,6 +9,8 @@ import json
 import time
 import tempfile
 import shutil
+import hashlib
+import datetime
 
 # Load environment variables
 load_dotenv()
@@ -51,6 +53,9 @@ class Indexer:
         
         self.writer = self.index.writer()
         logger.info("Indexer initialized")
+        
+        # Load master index file or create new one
+        self.master_index = self._load_master_index()
 
     def _upload_index_to_s3(self):
         """Upload the entire index directory to S3"""
@@ -81,19 +86,107 @@ class Indexer:
             logger.error(f"Error downloading index from S3: {str(e)}")
             raise
 
+    def _load_master_index(self):
+        """Load or create the master index file that maps keywords to document IDs"""
+        try:
+            response = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key='searchable_index/master_index.json')
+            master_index = json.loads(response['Body'].read().decode('utf-8'))
+            logger.info(f"Loaded master index with {len(master_index['documents'])} documents")
+            return master_index
+        except Exception as e:
+            logger.info(f"Creating new master index: {str(e)}")
+            # Create a new master index
+            return {
+                "last_updated": datetime.datetime.now().isoformat(),
+                "document_count": 0,
+                "documents": {},
+                "keywords": {}
+            }
+
+    def _save_master_index(self):
+        """Save the master index file to S3"""
+        try:
+            # Update timestamp
+            self.master_index["last_updated"] = datetime.datetime.now().isoformat()
+            
+            # Save to S3
+            s3_client.put_object(
+                Bucket=S3_BUCKET_NAME,
+                Key='searchable_index/master_index.json',
+                Body=json.dumps(self.master_index),
+                ContentType='application/json'
+            )
+            logger.info("Successfully saved master index to S3")
+        except Exception as e:
+            logger.error(f"Error saving master index to S3: {str(e)}")
+
+    def _extract_keywords(self, content):
+        """Extract important keywords from the content for faster searching"""
+        # Simple keyword extraction - split by spaces and filter common words
+        words = content.lower().split()
+        # Filter out common words and short words
+        stopwords = {'the', 'a', 'an', 'in', 'on', 'at', 'to', 'for', 'with', 'by', 'of', 'and', 'or', 'is', 'are'}
+        keywords = [word for word in words if word not in stopwords and len(word) > 3]
+        # Return unique keywords
+        return list(set(keywords))
+
     def index_document(self, url, content):
         if not content or not url:
             logger.warning(f"Skipping empty document for URL: {url}")
             return
 
         try:
+            # 1. Add to Whoosh index for full-text search
             self.writer.add_document(url=url, content=content)
             self.writer.commit()
-            logger.info(f"Successfully indexed document from {url} ({len(content)} chars)")
+            logger.info(f"Successfully indexed document in Whoosh: {url} ({len(content)} chars)")
             self.writer = self.index.writer()  # Create new writer for next document
             
-            # Upload updated index to S3
+            # 2. Create searchable JSON file for this document
+            doc_id = hashlib.md5(url.encode()).hexdigest()
+            document_data = {
+                "url": url,
+                "content": content[:5000],  # Store more content (up to 5000 chars)
+                "content_length": len(content),
+                "timestamp": datetime.datetime.now().isoformat(),
+                "id": doc_id
+            }
+            
+            # Extract keywords for faster searching
+            keywords = self._extract_keywords(content)
+            document_data["keywords"] = keywords
+            
+            # Save individual document JSON
+            s3_client.put_object(
+                Bucket=S3_BUCKET_NAME,
+                Key=f'searchable_index/documents/{doc_id}.json',
+                Body=json.dumps(document_data),
+                ContentType='application/json'
+            )
+            
+            # 3. Update master index
+            self.master_index["documents"][doc_id] = {
+                "url": url,
+                "timestamp": document_data["timestamp"]
+            }
+            
+            # Add keyword mappings for faster searching
+            for keyword in keywords:
+                if keyword not in self.master_index["keywords"]:
+                    self.master_index["keywords"][keyword] = []
+                if doc_id not in self.master_index["keywords"][keyword]:
+                    self.master_index["keywords"][keyword].append(doc_id)
+            
+            # Update document count
+            self.master_index["document_count"] = len(self.master_index["documents"])
+            
+            # 4. Save master index
+            self._save_master_index()
+            
+            # 5. Upload full index to S3
             self._upload_index_to_s3()
+            
+            logger.info(f"Successfully indexed document with optimized search: {url}")
         except Exception as e:
             logger.error(f"Error indexing document from {url}: {str(e)}")
             try:
@@ -111,10 +204,38 @@ class Indexer:
 
     def search(self, query_text):
         try:
-            with self.index.searcher() as searcher:
-                query = QueryParser("content", self.index.schema).parse(query_text)
-                results = searcher.search(query, limit=10)
-                return [hit['url'] for hit in results]
+            # 1. Fast search using master index
+            results = []
+            query_words = query_text.lower().split()
+            
+            # Check if any keywords match
+            matching_docs = set()
+            for word in query_words:
+                if len(word) > 3 and word in self.master_index["keywords"]:
+                    matching_docs.update(self.master_index["keywords"][word])
+            
+            # Get the document URLs
+            for doc_id in matching_docs:
+                if doc_id in self.master_index["documents"]:
+                    results.append(self.master_index["documents"][doc_id]["url"])
+            
+            logger.info(f"Quick search found {len(results)} results for '{query_text}'")
+            
+            # 2. If not enough results, use the more thorough Whoosh search
+            if len(results) < 5:
+                with self.index.searcher() as searcher:
+                    query = QueryParser("content", self.index.schema).parse(query_text)
+                    whoosh_results = searcher.search(query, limit=10)
+                    whoosh_urls = [hit['url'] for hit in whoosh_results]
+                    
+                    # Add any new results
+                    for url in whoosh_urls:
+                        if url not in results:
+                            results.append(url)
+                    
+                logger.info(f"Combined search found {len(results)} results for '{query_text}'")
+            
+            return results
         except Exception as e:
             logger.error(f"Error searching for {query_text}: {e}")
             return []
