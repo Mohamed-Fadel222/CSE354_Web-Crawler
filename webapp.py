@@ -8,12 +8,69 @@ import tempfile
 import io
 import base64
 import time
+import socket
+import traceback
+import sys
+from datetime import datetime
+from botocore.exceptions import ClientError
+
+# Message type tag constants for consistent tagging - matches other nodes
+class MessageTags:
+    # URL message types
+    URL_NEW = 0         # Fresh URL to be crawled
+    URL_RETRY = 1       # URL being retried after a failure
+    URL_PRIORITY = 2    # High priority URL to crawl next
+    
+    # Content message types
+    CONTENT_TEXT = 10   # Regular text content
+    CONTENT_HTML = 11   # Raw HTML content
+    CONTENT_MEDIA = 12  # Media content or reference
+    
+    # Processing status
+    STATUS_SUCCESS = 20   # Processing completed successfully
+    STATUS_WARNING = 21   # Processing had warnings
+    STATUS_ERROR = 22     # Processing had errors
+    
+    # System messages
+    SYSTEM_INFO = 90      # System information message
+    SYSTEM_CONFIG = 91    # Configuration update
+    SYSTEM_COMMAND = 92   # Command to crawler nodes
+    
+    # Special messages
+    HEARTBEAT = 99        # Heartbeat/keep-alive message
+    SHUTDOWN = 999        # System shutdown signal
+
+# Map tag numbers to human-readable names
+TAG_NAMES = {
+    MessageTags.URL_NEW: "New URL",
+    MessageTags.URL_RETRY: "Retry URL",
+    MessageTags.URL_PRIORITY: "Priority URL",
+    MessageTags.CONTENT_TEXT: "Text Content",
+    MessageTags.CONTENT_HTML: "HTML Content",
+    MessageTags.CONTENT_MEDIA: "Media Content",
+    MessageTags.STATUS_SUCCESS: "Success",
+    MessageTags.STATUS_WARNING: "Warning",
+    MessageTags.STATUS_ERROR: "Error",
+    MessageTags.SYSTEM_INFO: "System Info",
+    MessageTags.SYSTEM_CONFIG: "Configuration",
+    MessageTags.SYSTEM_COMMAND: "Command",
+    MessageTags.HEARTBEAT: "Heartbeat",
+    MessageTags.SHUTDOWN: "Shutdown"
+}
 
 # Load environment variables
 load_dotenv()
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+os.makedirs('logs', exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(f'logs/webapp_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
 logger = logging.getLogger('WebApp')
 
 # AWS Configuration
@@ -27,17 +84,51 @@ logger.info(f"SQS Content Queue: {SQS_QUEUE_URL}")
 logger.info(f"SQS URLs Queue: {SQS_URLS_QUEUE}")
 logger.info(f"S3 Bucket: {S3_BUCKET_NAME}")
 
-# Initialize AWS clients
-sqs_client = boto3.client('sqs', region_name=AWS_REGION)
-s3_client = boto3.client('s3', region_name=AWS_REGION)
+# Log message tag definitions
+logger.info("Message tag definitions:")
+for tag_name in dir(MessageTags):
+    if not tag_name.startswith('__'):
+        tag_value = getattr(MessageTags, tag_name)
+        logger.info(f"  {tag_name} = {tag_value}")
+
+# Initialize AWS clients with retry configuration
+try:
+    session = boto3.Session(region_name=AWS_REGION)
+    sqs_client = session.client('sqs', 
+                            config=boto3.session.Config(
+                                retries={'max_attempts': 5, 'mode': 'standard'},
+                                connect_timeout=5,
+                                read_timeout=10
+                            ))
+    s3_client = session.client('s3', 
+                            config=boto3.session.Config(
+                                retries={'max_attempts': 5, 'mode': 'standard'},
+                                connect_timeout=5,
+                                read_timeout=10
+                            ))
+    logger.info("AWS clients initialized with retry configuration")
+except Exception as e:
+    logger.critical(f"Failed to initialize AWS clients: {str(e)}")
+    logger.critical(traceback.format_exc())
+    sys.exit(1)
 
 # Initialize Flask app
 app = Flask(__name__)
+app.webapp_id = f"webapp-{socket.gethostname()[:8]}"
+logger.info(f"Initialized webapp with ID: {app.webapp_id}")
 
 # Global cache for URLs (to avoid repeated S3/SQS queries)
 url_cache = []
 last_cache_update = 0
 CACHE_TTL = 60  # seconds
+
+# Global node state tracking
+nodes = {
+    'crawlers': {},
+    'indexers': {}
+}
+last_nodes_update = 0
+NODES_CACHE_TTL = 30  # seconds
 
 @app.route('/')
 def index():
