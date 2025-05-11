@@ -33,7 +33,9 @@ class MasterNode:
         self.crawled_urls = set()
         self.start_time = datetime.now()
         self.last_status_print = datetime.now()
+        self.last_status_queue = datetime.now()
         self.status_print_interval = timedelta(seconds=10)
+        self.status_queue_interval = timedelta(seconds=60)  # Only send status messages to queue every 60 seconds
 
     def print_status(self):
         try:
@@ -51,22 +53,28 @@ class MasterNode:
             urls_queue_size = int(urls_queue_attrs['Attributes']['ApproximateNumberOfMessages'])
             content_queue_size = int(content_queue_attrs['Attributes']['ApproximateNumberOfMessages'])
             
-            # Send status message to content queue
-            status_message = {
-                'tag': MSG_TAG_INFO,
-                'message_type': 'system_status',
-                'timestamp': datetime.now().isoformat(),
-                'urls_queue_size': urls_queue_size,
-                'content_queue_size': content_queue_size,
-                'urls_crawled': len(self.crawled_urls),
-                'uptime_seconds': (datetime.now() - self.start_time).total_seconds()
-            }
-            
-            # Send the status message to the queue for webapp to consume
-            sqs_client.send_message(
-                QueueUrl=SQS_QUEUE_URL,
-                MessageBody=json.dumps(status_message)
-            )
+            # Only send status message to content queue less frequently
+            # to prevent flooding the queue with status messages
+            current_time = datetime.now()
+            if current_time - self.last_status_queue >= self.status_queue_interval:
+                # Send status message to content queue
+                status_message = {
+                    'tag': MSG_TAG_INFO,
+                    'message_type': 'system_status',
+                    'timestamp': datetime.now().isoformat(),
+                    'urls_queue_size': urls_queue_size,
+                    'content_queue_size': content_queue_size,
+                    'urls_crawled': len(self.crawled_urls),
+                    'uptime_seconds': (datetime.now() - self.start_time).total_seconds()
+                }
+                
+                # Send the status message to the queue for webapp to consume
+                sqs_client.send_message(
+                    QueueUrl=SQS_QUEUE_URL,
+                    MessageBody=json.dumps(status_message)
+                )
+                self.last_status_queue = current_time
+                logger.info("Sent status update to content queue")
             
             logger.info("\n=== System Status ===")
             logger.info(f"URLs Queue Size: {urls_queue_size}")

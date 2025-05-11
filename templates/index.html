@@ -187,7 +187,10 @@
         
         // Function to format tag display
         function formatTag(tag) {
-            return `<span class="tag tag-${tag}">${tagNames[tag] || 'Unknown'}</span>`;
+            // Convert tag to string to ensure it works with string or numeric values
+            tag = String(tag);
+            const tagName = tagNames[tag] || 'Unknown';
+            return `<span class="tag tag-${tag}">${tagName}</span>`;
         }
         
         // Fetch system status

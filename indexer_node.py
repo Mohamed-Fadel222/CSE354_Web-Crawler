@@ -252,30 +252,42 @@ class Indexer:
     def process_sqs_message(self, message):
         try:
             body = json.loads(message['Body'])
-            url = body.get('url')
-            content = body.get('content')
             tag = body.get('tag', MSG_TAG_CONTENT)  # Default to content tag if not specified
             
-            if not url:
-                logger.warning(f"Message missing URL field: {body}")
-                return
-                
             # Handle different message types based on tag
             if tag == MSG_TAG_CONTENT:
+                url = body.get('url')
+                content = body.get('content')
+                
+                if not url:
+                    logger.warning(f"Content message missing URL field: {body}")
+                    return
+                    
                 if content:
                     logger.info(f"Processing content from {url} (tag: {tag})")
                     self.index_document(url, content)
                 else:
                     logger.warning(f"Content message missing content field: {url}")
+            elif tag == MSG_TAG_INFO:
+                # Handle info/status messages without URL field
+                message_type = body.get('message_type')
+                if message_type == 'system_status':
+                    # These are system status updates from master node - just log them
+                    logger.debug(f"Received system status update: {body}")
+                else:
+                    logger.info(f"Received info message: {body}")
             elif tag == MSG_TAG_ERROR:
                 # Log error messages but don't index them
                 error = body.get('error', 'Unknown error')
+                url = body.get('url', 'No URL specified')
                 logger.error(f"Received error message: {error} for URL: {url}")
-            elif tag == MSG_TAG_INFO:
-                # Just log informational messages
-                logger.info(f"Received info message for URL: {url}")
+            elif tag == MSG_TAG_WARNING:
+                # Log warning messages
+                warning = body.get('message', 'Unknown warning')
+                url = body.get('url', 'No URL specified')
+                logger.warning(f"Received warning message: {warning} for URL: {url}")
             else:
-                logger.warning(f"Received message with unknown tag {tag} for URL: {url}")
+                logger.warning(f"Received message with unknown tag {tag}: {body}")
             
             # Delete the message from the queue
             sqs_client.delete_message(
@@ -283,7 +295,7 @@ class Indexer:
                 ReceiptHandle=message['ReceiptHandle']
             )
             
-            logger.info(f"Successfully processed and deleted message for {url}")
+            logger.info(f"Successfully processed and deleted message with tag {tag}")
             
         except json.JSONDecodeError as e:
             logger.error(f"Error decoding message: {str(e)}")
