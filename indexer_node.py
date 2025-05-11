@@ -78,13 +78,13 @@ for tag_name in dir(MessageTags):
 try:
     session = boto3.Session(region_name=AWS_REGION)
     sqs_client = session.client('sqs', 
-                            config=boto3.session.Config(
+                            config=boto3.config.Config(
                                 retries={'max_attempts': 5, 'mode': 'standard'},
                                 connect_timeout=5,
                                 read_timeout=10
                             ))
     s3_client = session.client('s3', 
-                            config=boto3.session.Config(
+                            config=boto3.config.Config(
                                 retries={'max_attempts': 5, 'mode': 'standard'},
                                 connect_timeout=5,
                                 read_timeout=10

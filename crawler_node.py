@@ -97,7 +97,7 @@ logger.info(f"  Dead Letter Queue: {SQS_DLQ_URL if SQS_DLQ_URL else 'Not configu
 try:
     session = boto3.Session(region_name=AWS_REGION)
     sqs_client = session.client('sqs', 
-                               config=boto3.session.Config(
+                               config=boto3.config.Config(
                                    retries={'max_attempts': 5, 'mode': 'standard'},
                                    connect_timeout=5,
                                    read_timeout=10
