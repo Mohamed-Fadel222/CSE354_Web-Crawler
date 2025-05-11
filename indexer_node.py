@@ -9,8 +9,8 @@ import json
 import time
 import tempfile
 import shutil
-from message_tags import *  # Import all message tags
-from botocore.exceptions import ClientError
+import hashlib
+import datetime
 
 # Load environment variables
 load_dotenv()
@@ -22,7 +22,6 @@ logger = logging.getLogger('Indexer')
 # AWS Configuration
 AWS_REGION = os.getenv('AWS_REGION', 'eu-north-1')
 SQS_QUEUE_URL = os.getenv('SQS_QUEUE_URL')
-SQS_QUEUE_NAME = os.path.basename(SQS_QUEUE_URL) if SQS_QUEUE_URL else 'web-crawler-queue'
 S3_BUCKET_NAME = os.getenv('S3_BUCKET_NAME')
 logger.info(f"Using SQS Queue URL: {SQS_QUEUE_URL}")
 logger.info(f"Using AWS Region: {AWS_REGION}")
@@ -30,39 +29,7 @@ logger.info(f"Using S3 Bucket: {S3_BUCKET_NAME}")
 
 # Initialize AWS clients
 sqs_client = boto3.client('sqs', region_name=AWS_REGION)
-sqs_resource = boto3.resource('sqs', region_name=AWS_REGION)
 s3_client = boto3.client('s3', region_name=AWS_REGION)
-
-def ensure_sqs_queue_exists():
-    """Create the SQS queue if it doesn't exist already"""
-    global SQS_QUEUE_URL
-    try:
-        # Check if queue already exists
-        queues = sqs_client.list_queues(QueueNamePrefix=SQS_QUEUE_NAME)
-        if 'QueueUrls' in queues and queues['QueueUrls']:
-            SQS_QUEUE_URL = queues['QueueUrls'][0]
-            logger.info(f"Found existing queue: {SQS_QUEUE_URL}")
-            return SQS_QUEUE_URL
-        
-        # Create the queue
-        response = sqs_client.create_queue(
-            QueueName=SQS_QUEUE_NAME,
-            Attributes={
-                'VisibilityTimeout': '30',
-                'MessageRetentionPeriod': '86400'  # 1 day
-            }
-        )
-        SQS_QUEUE_URL = response['QueueUrl']
-        logger.info(f"Created new SQS queue: {SQS_QUEUE_URL}")
-        return SQS_QUEUE_URL
-    except Exception as e:
-        logger.error(f"Error ensuring SQS queue exists: {str(e)}")
-        return None
-
-# Ensure SQS queue exists before continuing
-SQS_QUEUE_URL = ensure_sqs_queue_exists()
-if not SQS_QUEUE_URL:
-    logger.error("Failed to create or find SQS queue. Check your AWS permissions.")
 
 class Indexer:
     def __init__(self):
@@ -86,6 +53,9 @@ class Indexer:
         
         self.writer = self.index.writer()
         logger.info("Indexer initialized")
+        
+        # Load master index file or create new one
+        self.master_index = self._load_master_index()
 
     def _upload_index_to_s3(self):
         """Upload the entire index directory to S3"""
@@ -116,87 +86,114 @@ class Indexer:
             logger.error(f"Error downloading index from S3: {str(e)}")
             raise
 
+    def _load_master_index(self):
+        """Load or create the master index file that maps keywords to document IDs"""
+        try:
+            response = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key='searchable_index/master_index.json')
+            master_index = json.loads(response['Body'].read().decode('utf-8'))
+            logger.info(f"Loaded master index with {len(master_index['documents'])} documents")
+            return master_index
+        except Exception as e:
+            logger.info(f"Creating new master index: {str(e)}")
+            # Create a new master index
+            return {
+                "last_updated": datetime.datetime.now().isoformat(),
+                "document_count": 0,
+                "documents": {},
+                "keywords": {}
+            }
+
+    def _save_master_index(self):
+        """Save the master index file to S3"""
+        try:
+            # Update timestamp
+            self.master_index["last_updated"] = datetime.datetime.now().isoformat()
+            
+            # Save to S3
+            s3_client.put_object(
+                Bucket=S3_BUCKET_NAME,
+                Key='searchable_index/master_index.json',
+                Body=json.dumps(self.master_index),
+                ContentType='application/json'
+            )
+            logger.info("Successfully saved master index to S3")
+        except Exception as e:
+            logger.error(f"Error saving master index to S3: {str(e)}")
+
+    def _extract_keywords(self, content):
+        """Extract important keywords from the content for faster searching"""
+        # Simple keyword extraction - split by spaces and filter common words
+        words = content.lower().split()
+        # Filter out common words and short words
+        stopwords = {'the', 'a', 'an', 'in', 'on', 'at', 'to', 'for', 'with', 'by', 'of', 'and', 'or', 'is', 'are'}
+        keywords = [word for word in words if word not in stopwords and len(word) > 3]
+        # Return unique keywords
+        return list(set(keywords))
+
     def index_document(self, url, content):
         if not content or not url:
             logger.warning(f"Skipping empty document for URL: {url}")
-            # Send error message
-            self._send_error_message(f"Empty document for URL: {url}")
             return
 
         try:
+            # 1. Add to Whoosh index for full-text search
             self.writer.add_document(url=url, content=content)
             self.writer.commit()
-            logger.info(f"Successfully indexed document from {url} ({len(content)} chars)")
+            logger.info(f"Successfully indexed document in Whoosh: {url} ({len(content)} chars)")
             self.writer = self.index.writer()  # Create new writer for next document
             
-            # Upload updated index to S3
+            # 2. Create searchable JSON file for this document
+            doc_id = hashlib.md5(url.encode()).hexdigest()
+            document_data = {
+                "url": url,
+                "content": content[:5000],  # Store more content (up to 5000 chars)
+                "content_length": len(content),
+                "timestamp": datetime.datetime.now().isoformat(),
+                "id": doc_id
+            }
+            
+            # Extract keywords for faster searching
+            keywords = self._extract_keywords(content)
+            document_data["keywords"] = keywords
+            
+            # Save individual document JSON
+            s3_client.put_object(
+                Bucket=S3_BUCKET_NAME,
+                Key=f'searchable_index/documents/{doc_id}.json',
+                Body=json.dumps(document_data),
+                ContentType='application/json'
+            )
+            
+            # 3. Update master index
+            self.master_index["documents"][doc_id] = {
+                "url": url,
+                "timestamp": document_data["timestamp"]
+            }
+            
+            # Add keyword mappings for faster searching
+            for keyword in keywords:
+                if keyword not in self.master_index["keywords"]:
+                    self.master_index["keywords"][keyword] = []
+                if doc_id not in self.master_index["keywords"][keyword]:
+                    self.master_index["keywords"][keyword].append(doc_id)
+            
+            # Update document count
+            self.master_index["document_count"] = len(self.master_index["documents"])
+            
+            # 4. Save master index
+            self._save_master_index()
+            
+            # 5. Upload full index to S3
             self._upload_index_to_s3()
+            
+            logger.info(f"Successfully indexed document with optimized search: {url}")
         except Exception as e:
             logger.error(f"Error indexing document from {url}: {str(e)}")
-            # Send error message
-            self._send_error_message(f"Error indexing document from {url}: {str(e)}")
             try:
                 self.writer.cancel()
             except:
                 pass
             self.writer = self.index.writer()  # Create new writer after error
-
-    def _send_error_message(self, error_msg):
-        """Send error message to SQS with error tag"""
-        if not SQS_QUEUE_URL:
-            logger.error(f"Cannot send error message - no queue URL: {error_msg}")
-            return
-            
-        try:
-            sqs_client.send_message(
-                QueueUrl=SQS_QUEUE_URL,
-                MessageBody=json.dumps({
-                    'tag': MSG_TAG_ERROR,
-                    'message': error_msg,
-                    'timestamp': time.time()
-                })
-            )
-            logger.info(f"Sent error message: {error_msg}")
-        except ClientError as e:
-            if e.response['Error']['Code'] == 'AWS.SimpleQueueService.NonExistentQueue':
-                # Try to recreate queue
-                global SQS_QUEUE_URL
-                SQS_QUEUE_URL = ensure_sqs_queue_exists()
-                if SQS_QUEUE_URL:
-                    logger.info(f"Recreated queue: {SQS_QUEUE_URL}")
-                    # Try again with new queue
-                    self._send_error_message(error_msg)
-            else:
-                logger.error(f"Failed to send error message: {str(e)}")
-        except Exception as e:
-            logger.error(f"Failed to send error message: {str(e)}")
-
-    def _send_heartbeat(self, status_msg="Indexer running"):
-        """Send heartbeat message to SQS"""
-        if not SQS_QUEUE_URL:
-            logger.error(f"Cannot send heartbeat - no queue URL: {status_msg}")
-            return
-            
-        try:
-            sqs_client.send_message(
-                QueueUrl=SQS_QUEUE_URL,
-                MessageBody=json.dumps({
-                    'tag': MSG_TAG_HEARTBEAT,
-                    'message': status_msg,
-                    'timestamp': time.time()
-                })
-            )
-            logger.debug(f"Sent heartbeat: {status_msg}")
-        except ClientError as e:
-            if e.response['Error']['Code'] == 'AWS.SimpleQueueService.NonExistentQueue':
-                # Try to recreate queue
-                global SQS_QUEUE_URL
-                SQS_QUEUE_URL = ensure_sqs_queue_exists()
-                if SQS_QUEUE_URL:
-                    logger.info(f"Recreated queue: {SQS_QUEUE_URL}")
-            logger.error(f"Failed to send heartbeat: {str(e)}")
-        except Exception as e:
-            logger.error(f"Failed to send heartbeat: {str(e)}")
 
     def __del__(self):
         """Cleanup temporary directory when the indexer is destroyed"""
@@ -207,10 +204,38 @@ class Indexer:
 
     def search(self, query_text):
         try:
-            with self.index.searcher() as searcher:
-                query = QueryParser("content", self.index.schema).parse(query_text)
-                results = searcher.search(query, limit=10)
-                return [hit['url'] for hit in results]
+            # 1. Fast search using master index
+            results = []
+            query_words = query_text.lower().split()
+            
+            # Check if any keywords match
+            matching_docs = set()
+            for word in query_words:
+                if len(word) > 3 and word in self.master_index["keywords"]:
+                    matching_docs.update(self.master_index["keywords"][word])
+            
+            # Get the document URLs
+            for doc_id in matching_docs:
+                if doc_id in self.master_index["documents"]:
+                    results.append(self.master_index["documents"][doc_id]["url"])
+            
+            logger.info(f"Quick search found {len(results)} results for '{query_text}'")
+            
+            # 2. If not enough results, use the more thorough Whoosh search
+            if len(results) < 5:
+                with self.index.searcher() as searcher:
+                    query = QueryParser("content", self.index.schema).parse(query_text)
+                    whoosh_results = searcher.search(query, limit=10)
+                    whoosh_urls = [hit['url'] for hit in whoosh_results]
+                    
+                    # Add any new results
+                    for url in whoosh_urls:
+                        if url not in results:
+                            results.append(url)
+                    
+                logger.info(f"Combined search found {len(results)} results for '{query_text}'")
+            
+            return results
         except Exception as e:
             logger.error(f"Error searching for {query_text}: {e}")
             return []
@@ -218,45 +243,19 @@ class Indexer:
     def process_sqs_message(self, message):
         try:
             body = json.loads(message['Body'])
-            tag = body.get('tag', MSG_TAG_CONTENT_SUBMISSION)  # Default to content submission if no tag
+            url = body['url']
+            content = body['content']
             
-            if tag == MSG_TAG_CONTENT_SUBMISSION:
-                url = body.get('url')
-                content = body.get('content')
-                
-                if not url or not content:
-                    logger.warning(f"Skipping message with missing url or content, tag: {tag}")
-                else:
-                    logger.info(f"Processing content from {url} with tag {tag}")
-                    self.index_document(url, content)
-            elif tag == MSG_TAG_HEARTBEAT:
-                logger.info(f"Received heartbeat message: {body.get('message', 'No message')}")
-            elif tag == MSG_TAG_ERROR:
-                logger.warning(f"Received error message: {body.get('message', 'No message')}")
-            else:
-                logger.warning(f"Received message with unknown tag: {tag}")
+            logger.info(f"Processing content from {url}")
+            self.index_document(url, content)
             
             # Delete the message from the queue
-            if SQS_QUEUE_URL:
-                try:
-                    sqs_client.delete_message(
-                        QueueUrl=SQS_QUEUE_URL,
-                        ReceiptHandle=message['ReceiptHandle']
-                    )
-                    logger.info(f"Successfully processed and deleted message with tag {tag}")
-                except ClientError as e:
-                    if e.response['Error']['Code'] == 'AWS.SimpleQueueService.NonExistentQueue':
-                        # Queue doesn't exist anymore
-                        global SQS_QUEUE_URL
-                        SQS_QUEUE_URL = ensure_sqs_queue_exists()
-                        if SQS_QUEUE_URL:
-                            # Try again with new queue
-                            logger.info(f"Recreated queue: {SQS_QUEUE_URL}")
-                            # Note: Can't delete the message as it was from the old queue
-                    else:
-                        logger.error(f"Error deleting message: {str(e)}")
-            else:
-                logger.warning("Cannot delete message - no queue URL")
+            sqs_client.delete_message(
+                QueueUrl=SQS_QUEUE_URL,
+                ReceiptHandle=message['ReceiptHandle']
+            )
+            
+            logger.info(f"Successfully processed and deleted message for {url}")
             
         except json.JSONDecodeError as e:
             logger.error(f"Error decoding message: {str(e)}")
@@ -268,81 +267,35 @@ class Indexer:
             logger.error(f"Error processing message: {str(e)}")
         
         # Always try to delete the message to prevent reprocessing
-        # (only if we haven't already done it above)
-        if 'ReceiptHandle' in message and SQS_QUEUE_URL:
-            try:
-                sqs_client.delete_message(
-                    QueueUrl=SQS_QUEUE_URL,
-                    ReceiptHandle=message['ReceiptHandle']
-                )
-            except Exception as e:
-                # Ignore errors here as we might have already deleted it
-                pass
+        try:
+            sqs_client.delete_message(
+                QueueUrl=SQS_QUEUE_URL,
+                ReceiptHandle=message['ReceiptHandle']
+            )
+        except Exception as e:
+            logger.error(f"Error deleting message: {str(e)}")
 
     def indexer_loop(self):
-        last_heartbeat = 0
         while True:
             try:
-                # Send heartbeat every 5 minutes
-                current_time = time.time()
-                if current_time - last_heartbeat > 300:  # 5 minutes
-                    self._send_heartbeat()
-                    last_heartbeat = current_time
-                
-                global SQS_QUEUE_URL
-                if not SQS_QUEUE_URL:
-                    # Try to recreate the queue
-                    SQS_QUEUE_URL = ensure_sqs_queue_exists()
-                    if not SQS_QUEUE_URL:
-                        logger.error("Still no SQS queue URL. Waiting before retry...")
-                        time.sleep(30)  # Wait longer before retrying
-                        continue
-                
                 # Receive messages from SQS
-                try:
-                    response = sqs_client.receive_message(
-                        QueueUrl=SQS_QUEUE_URL,
-                        MaxNumberOfMessages=10,
-                        WaitTimeSeconds=20,
-                        VisibilityTimeout=30
-                    )
+                response = sqs_client.receive_message(
+                    QueueUrl=SQS_QUEUE_URL,
+                    MaxNumberOfMessages=10,
+                    WaitTimeSeconds=20,
+                    VisibilityTimeout=30
+                )
 
-                    if 'Messages' in response:
-                        for message in response['Messages']:
-                            self.process_sqs_message(message)
-                except ClientError as e:
-                    if e.response['Error']['Code'] == 'AWS.SimpleQueueService.NonExistentQueue':
-                        # Try to recreate queue
-                        SQS_QUEUE_URL = ensure_sqs_queue_exists()
-                        logger.info(f"Recreated queue after receiving error: {SQS_QUEUE_URL}")
-                    else:
-                        logger.error(f"Error receiving messages: {str(e)}")
-                        time.sleep(5)
-                except Exception as e:
-                    logger.error(f"Error receiving messages: {str(e)}")
-                    time.sleep(5)
+                if 'Messages' in response:
+                    for message in response['Messages']:
+                        self.process_sqs_message(message)
 
             except Exception as e:
                 logger.error(f"Error in indexer loop: {str(e)}")
-                self._send_error_message(f"Error in indexer loop: {str(e)}")
                 time.sleep(5)  # Wait before retrying
 
 def indexer_process():
     logger.info("Indexer node started")
-    
-    # Send heartbeat message to the queue
-    try:
-        sqs_client.send_message(
-            QueueUrl=SQS_QUEUE_URL,
-            MessageBody=json.dumps({
-                'tag': MSG_TAG_HEARTBEAT,
-                'message': 'Indexer node started',
-                'timestamp': time.time()
-            })
-        )
-    except Exception as e:
-        logger.error(f"Failed to send heartbeat: {str(e)}")
-    
     indexer = Indexer()
     indexer.indexer_loop()
 
