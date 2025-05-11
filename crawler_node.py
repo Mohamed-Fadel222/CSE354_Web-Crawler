@@ -9,7 +9,6 @@ from dotenv import load_dotenv
 import json
 import urllib3
 import warnings
-import uuid
 
 # Suppress warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -44,41 +43,19 @@ class Crawler:
         self.session.verify = False  # Disable SSL verification
         self.session.headers.update(self.headers)
         self.session.timeout = 10  # Set timeout for all requests
-        self.crawler_id = str(uuid.uuid4())[:8]  # Generate a short unique ID for this crawler
-        logger.info(f"Crawler initialized with ID: {self.crawler_id}")
-        
-        # Domain crawl limits - track URLs per domain
-        self.domain_url_counts = {}
-        self.max_urls_per_domain = 10  # Maximum URLs to crawl per domain
-        
-    def should_crawl_url(self, url):
-        """Check if we should crawl this URL based on domain limits"""
-        if url in self.visited_urls:
-            return False
-            
-        domain = self.get_domain_from_url(url)
-        if not domain:
-            return False
-            
-        # Check if we've reached domain limit
-        if domain in self.domain_url_counts and self.domain_url_counts[domain] >= self.max_urls_per_domain:
-            logger.info(f"[Crawler-{self.crawler_id}] Skipping {url} - reached limit of {self.max_urls_per_domain} URLs for domain {domain}")
-            return False
-            
-        return True
 
     def fetch_page(self, url):
         try:
-            logger.info(f"[Crawler-{self.crawler_id}] Attempting to fetch {url}")
+            logger.info(f"Attempting to fetch {url}")
             response = self.session.get(url)
             response.raise_for_status()
-            logger.info(f"[Crawler-{self.crawler_id}] Successfully fetched {url} ({len(response.text)} bytes)")
+            logger.info(f"Successfully fetched {url}")
             return response.text
         except requests.RequestException as e:
-            logger.error(f"[Crawler-{self.crawler_id}] Error fetching {url}: {str(e)}")
+            logger.error(f"Error fetching {url}: {str(e)}")
             return None
         except Exception as e:
-            logger.error(f"[Crawler-{self.crawler_id}] Unexpected error fetching {url}: {str(e)}")
+            logger.error(f"Unexpected error fetching {url}: {str(e)}")
             return None
 
     def extract_urls(self, html, base_url):
@@ -88,35 +65,17 @@ class Crawler:
         try:
             soup = BeautifulSoup(html, 'html.parser')
             urls = []
-            base_domain = urlparse(base_url).netloc
             
-            # Find all links
-            all_links = soup.find_all('a', href=True)
-            logger.info(f"[Crawler-{self.crawler_id}] Found {len(all_links)} total links on {base_url}")
-            
-            for link in all_links:
+            for link in soup.find_all('a', href=True):
                 href = link['href']
                 absolute_url = urljoin(base_url, href)
-                parsed_url = urlparse(absolute_url)
-                
-                # Only follow URLs from the same domain
-                if (parsed_url.netloc == base_domain and 
-                    self.is_valid_url(absolute_url) and 
-                    absolute_url not in self.visited_urls):
+                if self.is_valid_url(absolute_url) and absolute_url not in self.visited_urls:
                     urls.append(absolute_url)
             
-            # Limit to 10 URLs per page as requested
-            original_count = len(urls)
-            urls = urls[:10]
-            logger.info(f"[Crawler-{self.crawler_id}] Extracted {original_count} internal URLs from {base_url}, keeping 10 max")
-            
-            # Log the actual URLs being returned
-            for idx, url in enumerate(urls):
-                logger.info(f"[Crawler-{self.crawler_id}] URL {idx+1}: {url}")
-                
-            return urls
+            logger.info(f"Extracted {len(urls)} new URLs from {base_url}")
+            return urls[:10]  # Limit to 10 URLs per page to prevent overwhelming
         except Exception as e:
-            logger.error(f"[Crawler-{self.crawler_id}] Error extracting URLs from {base_url}: {str(e)}")
+            logger.error(f"Error extracting URLs from {base_url}: {str(e)}")
             return []
 
     def extract_text(self, html):
@@ -132,10 +91,10 @@ class Crawler:
             text = soup.get_text(separator=' ', strip=True)
             # Basic text cleaning
             text = ' '.join(text.split())
-            logger.info(f"[Crawler-{self.crawler_id}] Extracted {len(text)} characters of text")
+            logger.info(f"Extracted {len(text)} characters of text")
             return text
         except Exception as e:
-            logger.error(f"[Crawler-{self.crawler_id}] Error extracting text: {str(e)}")
+            logger.error(f"Error extracting text: {str(e)}")
             return ""
 
     def is_valid_url(self, url):
@@ -145,38 +104,13 @@ class Crawler:
         except Exception:
             return False
 
-    def get_domain_from_url(self, url):
-        try:
-            return urlparse(url).netloc
-        except:
-            return None
-
     def process_url(self, url):
-        """
-        Process a URL by crawling it and sending discovered URLs to the queue
-        """
-        # Check if we should crawl this URL
-        domain = self.get_domain_from_url(url)
-        if not domain:
-            logger.warning(f"[Crawler-{self.crawler_id}] Invalid domain for URL: {url}")
-            return
-            
-        # Skip if already visited
         if url in self.visited_urls:
-            logger.info(f"[Crawler-{self.crawler_id}] Already visited {url}, skipping")
-            return
-            
-        # Check domain limits
-        if domain in self.domain_url_counts and self.domain_url_counts[domain] >= self.max_urls_per_domain:
-            logger.info(f"[Crawler-{self.crawler_id}] Skipping {url} - reached limit of {self.max_urls_per_domain} URLs for domain {domain}")
+            logger.info(f"Already visited {url}, skipping")
             return
 
-        logger.info(f"[Crawler-{self.crawler_id}] Processing URL: {url}")
+        logger.info(f"Processing URL: {url}")
         self.visited_urls.add(url)
-        
-        # Update domain counter
-        self.domain_url_counts[domain] = self.domain_url_counts.get(domain, 0) + 1
-        logger.info(f"[Crawler-{self.crawler_id}] Domain {domain}: {self.domain_url_counts[domain]}/{self.max_urls_per_domain} URLs processed")
         
         # Fetch and parse the page
         html = self.fetch_page(url)
@@ -186,75 +120,38 @@ class Crawler:
             extracted_text = self.extract_text(html)
             
             if extracted_text:
+                # Send extracted URLs to the URLs queue
+                for new_url in extracted_urls:
+                    try:
+                        sqs_client.send_message(
+                            QueueUrl=SQS_URLS_QUEUE,
+                            MessageBody=json.dumps({'url': new_url})
+                        )
+                        logger.info(f"Sent new URL to queue: {new_url}")
+                    except Exception as e:
+                        logger.error(f"Error sending URL to queue: {str(e)}")
+                
                 # Send content to indexer queue
                 message_body = {
                     'url': url,
-                    'content': extracted_text[:5000],  # Increased content size
+                    'content': extracted_text[:1000],  # Limit content size
                 }
                 
                 try:
-                    response = sqs_client.send_message(
+                    sqs_client.send_message(
                         QueueUrl=SQS_QUEUE_URL,
                         MessageBody=json.dumps(message_body)
                     )
-                    logger.info(f"[Crawler-{self.crawler_id}] Sent content to indexer queue for {url} (MessageId: {response.get('MessageId')})")
+                    logger.info(f"Sent content to SQS for {url}")
                 except Exception as e:
-                    logger.error(f"[Crawler-{self.crawler_id}] Error sending to indexer queue: {str(e)}")
-            
-            # Queue all discovered URLs to the URLs queue (letting master node handle them)
-            if extracted_urls:
-                urls_queued = 0
-                for new_url in extracted_urls:
-                    new_domain = self.get_domain_from_url(new_url)
-                    
-                    # Only queue if we haven't hit the domain limit yet
-                    current_count = self.domain_url_counts.get(new_domain, 0)
-                    if current_count < self.max_urls_per_domain:
-                        try:
-                            response = sqs_client.send_message(
-                                QueueUrl=SQS_URLS_QUEUE,
-                                MessageBody=json.dumps({'url': new_url})
-                            )
-                            urls_queued += 1
-                            logger.info(f"[Crawler-{self.crawler_id}] Queued new URL for crawling: {new_url} (MessageId: {response.get('MessageId')})")
-                        except Exception as e:
-                            logger.error(f"[Crawler-{self.crawler_id}] Error queuing URL {new_url}: {str(e)}")
-                    else:
-                        logger.info(f"[Crawler-{self.crawler_id}] Skipping {new_url} - domain {new_domain} reached limit of {self.max_urls_per_domain}")
-                
-                logger.info(f"[Crawler-{self.crawler_id}] SUCCESS: Queued {urls_queued} URLs from {url} for further crawling")
-                            
-        # Implement crawl delay
-        time.sleep(self.crawl_delay)
-
-    def test_extract_and_queue(self, url):
-        """
-        Test function to extract URLs from a page and print them,
-        but not actually queue them. Useful for debugging.
-        """
-        logger.info(f"[TEST] Testing URL extraction on {url}")
-        html = self.fetch_page(url)
-        if html:
-            urls = self.extract_urls(html, url)
-            logger.info(f"[TEST] Found {len(urls)} URLs to crawl on {url}")
-            for i, extracted_url in enumerate(urls):
-                logger.info(f"[TEST] URL {i+1}: {extracted_url}")
-        else:
-            logger.error(f"[TEST] Could not fetch {url}")
+                    logger.error(f"Error sending to SQS: {str(e)}")
 
 def crawler_process():
-    logger.info("*** Crawler node started - Processing URLs and sending discovered URLs to queue ***")
-    logger.info("*** FLOW: 1) Pull URLs from queue → 2) Crawl each URL → 3) Extract links → 4) Send links back to queue ***")
+    logger.info("Crawler node started")
     crawler = Crawler()
-    
-    # Optional: Test URL extraction on a specific URL
-    # crawler.test_extract_and_queue("https://example.com")
     
     while True:
         try:
-            # Log that we're waiting for messages
-            logger.info(f"[Crawler-{crawler.crawler_id}] Waiting for URLs from the queue...")
-            
             # Receive URL from SQS
             response = sqs_client.receive_message(
                 QueueUrl=SQS_URLS_QUEUE,
@@ -264,56 +161,39 @@ def crawler_process():
             )
 
             if 'Messages' in response:
-                msg_count = len(response['Messages'])
-                logger.info(f"[Crawler-{crawler.crawler_id}] Received {msg_count} message(s) from queue")
-                
                 for message in response['Messages']:
-                    receipt_handle = message['ReceiptHandle']
-                    message_id = message.get('MessageId', 'unknown')
-                    
                     try:
                         body = json.loads(message['Body'])
                         url = body['url']
                         
-                        logger.info(f"[Crawler-{crawler.crawler_id}] Received URL from queue: {url} (MessageId: {message_id})")
-                        
-                        # Process the URL (fetches content and queues discovered URLs)
+                        # Process the URL
                         crawler.process_url(url)
                         
-                        # Delete the message from the queue after successful processing
+                        # Delete the message from the queue
                         sqs_client.delete_message(
                             QueueUrl=SQS_URLS_QUEUE,
-                            ReceiptHandle=receipt_handle
+                            ReceiptHandle=message['ReceiptHandle']
                         )
-                        logger.info(f"[Crawler-{crawler.crawler_id}] Successfully processed and deleted message for {url}")
                         
                     except json.JSONDecodeError as e:
-                        logger.error(f"[Crawler-{crawler.crawler_id}] Error decoding message: {str(e)}")
-                        # Delete malformed messages
+                        logger.error(f"Error decoding message: {str(e)}")
+                    except Exception as e:
+                        logger.error(f"Error processing message: {str(e)}")
+                    
+                    # Always try to delete the message
+                    try:
                         sqs_client.delete_message(
                             QueueUrl=SQS_URLS_QUEUE,
-                            ReceiptHandle=receipt_handle
+                            ReceiptHandle=message['ReceiptHandle']
                         )
                     except Exception as e:
-                        logger.error(f"[Crawler-{crawler.crawler_id}] Error processing message: {str(e)}")
-                        # Return the message to the queue for retry
-                        try:
-                            sqs_client.change_message_visibility(
-                                QueueUrl=SQS_URLS_QUEUE,
-                                ReceiptHandle=receipt_handle,
-                                VisibilityTimeout=0  # Make immediately visible for retry
-                            )
-                            logger.info(f"[Crawler-{crawler.crawler_id}] Returned message to queue for retry")
-                        except Exception as e:
-                            logger.error(f"[Crawler-{crawler.crawler_id}] Error changing message visibility: {str(e)}")
-            else:
-                logger.info(f"[Crawler-{crawler.crawler_id}] No messages received from queue")
+                        logger.error(f"Error deleting message: {str(e)}")
             
-            # Small delay between queue checks
-            time.sleep(2)
+            # Implement crawl delay
+            time.sleep(crawler.crawl_delay)
             
         except Exception as e:
-            logger.error(f"[Crawler-{crawler.crawler_id}] Error in crawler process: {str(e)}")
+            logger.error(f"Error in crawler process: {str(e)}")
             time.sleep(5)  # Wait before retrying
 
 if __name__ == '__main__':
