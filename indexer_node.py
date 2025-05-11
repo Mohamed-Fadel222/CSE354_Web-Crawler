@@ -9,6 +9,7 @@ import json
 import time
 import tempfile
 import shutil
+from message_tags import *  # Import all message tags
 
 # Load environment variables
 load_dotenv()
@@ -84,6 +85,8 @@ class Indexer:
     def index_document(self, url, content):
         if not content or not url:
             logger.warning(f"Skipping empty document for URL: {url}")
+            # Send error message
+            self._send_error_message(f"Empty document for URL: {url}")
             return
 
         try:
@@ -96,11 +99,43 @@ class Indexer:
             self._upload_index_to_s3()
         except Exception as e:
             logger.error(f"Error indexing document from {url}: {str(e)}")
+            # Send error message
+            self._send_error_message(f"Error indexing document from {url}: {str(e)}")
             try:
                 self.writer.cancel()
             except:
                 pass
             self.writer = self.index.writer()  # Create new writer after error
+
+    def _send_error_message(self, error_msg):
+        """Send error message to SQS with error tag"""
+        try:
+            sqs_client.send_message(
+                QueueUrl=SQS_QUEUE_URL,
+                MessageBody=json.dumps({
+                    'tag': MSG_TAG_ERROR,
+                    'message': error_msg,
+                    'timestamp': time.time()
+                })
+            )
+            logger.info(f"Sent error message: {error_msg}")
+        except Exception as e:
+            logger.error(f"Failed to send error message: {str(e)}")
+
+    def _send_heartbeat(self, status_msg="Indexer running"):
+        """Send heartbeat message to SQS"""
+        try:
+            sqs_client.send_message(
+                QueueUrl=SQS_QUEUE_URL,
+                MessageBody=json.dumps({
+                    'tag': MSG_TAG_HEARTBEAT,
+                    'message': status_msg,
+                    'timestamp': time.time()
+                })
+            )
+            logger.debug(f"Sent heartbeat: {status_msg}")
+        except Exception as e:
+            logger.error(f"Failed to send heartbeat: {str(e)}")
 
     def __del__(self):
         """Cleanup temporary directory when the indexer is destroyed"""
@@ -122,11 +157,23 @@ class Indexer:
     def process_sqs_message(self, message):
         try:
             body = json.loads(message['Body'])
-            url = body['url']
-            content = body['content']
+            tag = body.get('tag', MSG_TAG_CONTENT_SUBMISSION)  # Default to content submission if no tag
             
-            logger.info(f"Processing content from {url}")
-            self.index_document(url, content)
+            if tag == MSG_TAG_CONTENT_SUBMISSION:
+                url = body.get('url')
+                content = body.get('content')
+                
+                if not url or not content:
+                    logger.warning(f"Skipping message with missing url or content, tag: {tag}")
+                else:
+                    logger.info(f"Processing content from {url} with tag {tag}")
+                    self.index_document(url, content)
+            elif tag == MSG_TAG_HEARTBEAT:
+                logger.info(f"Received heartbeat message: {body.get('message', 'No message')}")
+            elif tag == MSG_TAG_ERROR:
+                logger.warning(f"Received error message: {body.get('message', 'No message')}")
+            else:
+                logger.warning(f"Received message with unknown tag: {tag}")
             
             # Delete the message from the queue
             sqs_client.delete_message(
@@ -134,7 +181,7 @@ class Indexer:
                 ReceiptHandle=message['ReceiptHandle']
             )
             
-            logger.info(f"Successfully processed and deleted message for {url}")
+            logger.info(f"Successfully processed and deleted message with tag {tag}")
             
         except json.JSONDecodeError as e:
             logger.error(f"Error decoding message: {str(e)}")
@@ -155,8 +202,15 @@ class Indexer:
             logger.error(f"Error deleting message: {str(e)}")
 
     def indexer_loop(self):
+        last_heartbeat = 0
         while True:
             try:
+                # Send heartbeat every 5 minutes
+                current_time = time.time()
+                if current_time - last_heartbeat > 300:  # 5 minutes
+                    self._send_heartbeat()
+                    last_heartbeat = current_time
+                
                 # Receive messages from SQS
                 response = sqs_client.receive_message(
                     QueueUrl=SQS_QUEUE_URL,
@@ -171,10 +225,25 @@ class Indexer:
 
             except Exception as e:
                 logger.error(f"Error in indexer loop: {str(e)}")
+                self._send_error_message(f"Error in indexer loop: {str(e)}")
                 time.sleep(5)  # Wait before retrying
 
 def indexer_process():
     logger.info("Indexer node started")
+    
+    # Send heartbeat message to the queue
+    try:
+        sqs_client.send_message(
+            QueueUrl=SQS_QUEUE_URL,
+            MessageBody=json.dumps({
+                'tag': MSG_TAG_HEARTBEAT,
+                'message': 'Indexer node started',
+                'timestamp': time.time()
+            })
+        )
+    except Exception as e:
+        logger.error(f"Failed to send heartbeat: {str(e)}")
+    
     indexer = Indexer()
     indexer.indexer_loop()
 
