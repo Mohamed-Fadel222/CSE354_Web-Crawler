@@ -31,3 +31,5 @@
  * Running on http://192.168.1.6:5000
 2025-05-11 22:07:10,361 - werkzeug - INFO - [33mPress CTRL+C to quit[0m
 2025-05-11 22:07:10,366 - werkzeug - INFO -  * Restarting with stat
+2025-05-11 22:08:21,934 - werkzeug - INFO -  * Restarting with stat
+2025-05-11 22:08:34,716 - werkzeug - INFO -  * Restarting with stat
