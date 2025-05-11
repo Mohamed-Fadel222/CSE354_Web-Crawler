@@ -65,15 +65,23 @@ class Crawler:
         try:
             soup = BeautifulSoup(html, 'html.parser')
             urls = []
+            base_domain = urlparse(base_url).netloc
             
             for link in soup.find_all('a', href=True):
                 href = link['href']
                 absolute_url = urljoin(base_url, href)
-                if self.is_valid_url(absolute_url) and absolute_url not in self.visited_urls:
+                parsed_url = urlparse(absolute_url)
+                
+                # Only follow URLs from the same domain
+                if (parsed_url.netloc == base_domain and 
+                    self.is_valid_url(absolute_url) and 
+                    absolute_url not in self.visited_urls):
                     urls.append(absolute_url)
             
-            logger.info(f"Extracted {len(urls)} URLs from {base_url} (not sending to queue per configuration)")
-            return urls[:10]  # Limit to 10 URLs per page
+            # Limit to 10 URLs per page as requested
+            urls = urls[:10]
+            logger.info(f"Extracted {len(urls)} internal URLs from {base_url} (limited to 10 max)")
+            return urls
         except Exception as e:
             logger.error(f"Error extracting URLs from {base_url}: {str(e)}")
             return []
@@ -104,7 +112,17 @@ class Crawler:
         except Exception:
             return False
 
+    def get_domain_from_url(self, url):
+        try:
+            return urlparse(url).netloc
+        except:
+            return None
+
     def process_url(self, url):
+        """
+        Process a URL by crawling it and sending discovered URLs to the queue
+        """
+        # Skip if already visited
         if url in self.visited_urls:
             logger.info(f"Already visited {url}, skipping")
             return
@@ -115,7 +133,7 @@ class Crawler:
         # Fetch and parse the page
         html = self.fetch_page(url)
         if html:
-            # Extract URLs and text content - but don't send extracted URLs to queue
+            # Extract URLs and text content
             extracted_urls = self.extract_urls(html, url)
             extracted_text = self.extract_text(html)
             
@@ -123,7 +141,7 @@ class Crawler:
                 # Send content to indexer queue
                 message_body = {
                     'url': url,
-                    'content': extracted_text[:1000],  # Limit content size
+                    'content': extracted_text[:5000],  # Increased content size
                 }
                 
                 try:
@@ -134,9 +152,28 @@ class Crawler:
                     logger.info(f"Sent content to SQS for {url}")
                 except Exception as e:
                     logger.error(f"Error sending to SQS: {str(e)}")
+            
+            # Queue all discovered URLs to the URLs queue (letting master node handle them)
+            if extracted_urls:
+                urls_queued = 0
+                for new_url in extracted_urls:
+                    try:
+                        sqs_client.send_message(
+                            QueueUrl=SQS_URLS_QUEUE,
+                            MessageBody=json.dumps({'url': new_url})
+                        )
+                        urls_queued += 1
+                        logger.info(f"Queued new URL for master node: {new_url}")
+                    except Exception as e:
+                        logger.error(f"Error queuing URL {new_url}: {str(e)}")
+                
+                logger.info(f"Queued {urls_queued} URLs from {url} for further processing")
+                            
+        # Implement crawl delay
+        time.sleep(self.crawl_delay)
 
 def crawler_process():
-    logger.info("Crawler node started - ONLY processing URLs from web app, not auto-discovering")
+    logger.info("Crawler node started - Processing URLs and sending discovered URLs to queue")
     crawler = Crawler()
     
     while True:
@@ -151,35 +188,43 @@ def crawler_process():
 
             if 'Messages' in response:
                 for message in response['Messages']:
+                    receipt_handle = message['ReceiptHandle']
                     try:
                         body = json.loads(message['Body'])
                         url = body['url']
                         
-                        # Process the URL
+                        # Process the URL (fetches content and queues discovered URLs)
                         crawler.process_url(url)
                         
-                        # Delete the message from the queue
+                        # Delete the message from the queue after successful processing
                         sqs_client.delete_message(
                             QueueUrl=SQS_URLS_QUEUE,
-                            ReceiptHandle=message['ReceiptHandle']
+                            ReceiptHandle=receipt_handle
                         )
+                        logger.info(f"Successfully processed and deleted message for {url}")
                         
                     except json.JSONDecodeError as e:
                         logger.error(f"Error decoding message: {str(e)}")
-                    except Exception as e:
-                        logger.error(f"Error processing message: {str(e)}")
-                    
-                    # Always try to delete the message
-                    try:
+                        # Delete malformed messages
                         sqs_client.delete_message(
                             QueueUrl=SQS_URLS_QUEUE,
-                            ReceiptHandle=message['ReceiptHandle']
+                            ReceiptHandle=receipt_handle
                         )
                     except Exception as e:
-                        logger.error(f"Error deleting message: {str(e)}")
+                        logger.error(f"Error processing message: {str(e)}")
+                        # Return the message to the queue for retry
+                        try:
+                            sqs_client.change_message_visibility(
+                                QueueUrl=SQS_URLS_QUEUE,
+                                ReceiptHandle=receipt_handle,
+                                VisibilityTimeout=0  # Make immediately visible for retry
+                            )
+                            logger.info(f"Returned message to queue for retry")
+                        except Exception as e:
+                            logger.error(f"Error changing message visibility: {str(e)}")
             
-            # Implement crawl delay
-            time.sleep(crawler.crawl_delay)
+            # Small delay between queue checks
+            time.sleep(2)
             
         except Exception as e:
             logger.error(f"Error in crawler process: {str(e)}")

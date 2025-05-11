@@ -437,19 +437,29 @@ def search():
 def status():
     """Get system status"""
     try:
-        # Get queue attributes
+        # Force a fresh request for queue attributes (no caching)
         urls_queue_attrs = sqs_client.get_queue_attributes(
             QueueUrl=SQS_URLS_QUEUE,
-            AttributeNames=['ApproximateNumberOfMessages']
+            AttributeNames=['ApproximateNumberOfMessages', 'ApproximateNumberOfMessagesNotVisible']
         )
         
         content_queue_attrs = sqs_client.get_queue_attributes(
             QueueUrl=SQS_QUEUE_URL,
-            AttributeNames=['ApproximateNumberOfMessages']
+            AttributeNames=['ApproximateNumberOfMessages', 'ApproximateNumberOfMessagesNotVisible']
         )
         
-        urls_queue_size = int(urls_queue_attrs['Attributes']['ApproximateNumberOfMessages'])
-        content_queue_size = int(content_queue_attrs['Attributes']['ApproximateNumberOfMessages'])
+        # Get both visible and in-flight messages
+        urls_queue_visible = int(urls_queue_attrs['Attributes']['ApproximateNumberOfMessages'])
+        urls_queue_inflight = int(urls_queue_attrs['Attributes']['ApproximateNumberOfMessagesNotVisible'])
+        urls_queue_size = urls_queue_visible + urls_queue_inflight
+        
+        content_queue_visible = int(content_queue_attrs['Attributes']['ApproximateNumberOfMessages'])
+        content_queue_inflight = int(content_queue_attrs['Attributes']['ApproximateNumberOfMessagesNotVisible'])
+        content_queue_size = content_queue_visible + content_queue_inflight
+        
+        # Log the actual values for debugging
+        logger.info(f"URLs Queue: {urls_queue_visible} visible + {urls_queue_inflight} in flight = {urls_queue_size} total")
+        logger.info(f"Content Queue: {content_queue_visible} visible + {content_queue_inflight} in flight = {content_queue_size} total")
         
         # Check S3 bucket status
         try:
@@ -461,10 +471,20 @@ def status():
         status_data = {
             "urls_queue_size": urls_queue_size,
             "content_queue_size": content_queue_size,
-            "s3_status": s3_status
+            "urls_queue_visible": urls_queue_visible,
+            "urls_queue_inflight": urls_queue_inflight,
+            "content_queue_visible": content_queue_visible,
+            "content_queue_inflight": content_queue_inflight,
+            "s3_status": s3_status,
+            "timestamp": time.time()
         }
         
-        return jsonify(status_data)
+        # Add CORS headers to prevent issues with ngrok
+        response = jsonify(status_data)
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+        
+        return response
     except Exception as e:
         logger.error(f"Error getting status: {str(e)}")
         return jsonify({"error": str(e)}), 500
