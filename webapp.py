@@ -217,8 +217,7 @@ def refresh_url_cache():
 def search():
     """Fast search using the optimized index structure in S3"""
     query = request.args.get('query', '').lower()
-    max_results = int(request.args.get('max_results', '3'))  # Limit to 3 results by default
-    logger.info(f"Searching for: {query} (max results: {max_results})")
+    logger.info(f"Searching for: {query}")
     
     results = []
     
@@ -235,28 +234,16 @@ def search():
             
             # Use the keyword-based fast search
             query_words = query.lower().split()
-            matching_docs = {}  # Use a dict to track relevance scores
+            matching_docs = set()
             
             # Check if any keywords match
             for word in query_words:
                 if len(word) > 3 and word in master_index.get("keywords", {}):
-                    for doc_id in master_index["keywords"][word]:
-                        # Increase relevance score for each keyword match
-                        if doc_id not in matching_docs:
-                            matching_docs[doc_id] = 1
-                        else:
-                            matching_docs[doc_id] += 1
+                    matching_docs.update(master_index["keywords"][word])
                     logger.info(f"Keyword '{word}' matched {len(master_index['keywords'][word])} documents")
             
-            # Sort docs by relevance score (most matches first)
-            sorted_docs = sorted(matching_docs.items(), key=lambda x: x[1], reverse=True)
-            logger.info(f"Found {len(sorted_docs)} documents with relevant keywords")
-            
-            # Get top results
-            top_docs = sorted_docs[:max_results]
-            
             # Get the document content and URLs
-            for doc_id, score in top_docs:
+            for doc_id in matching_docs:
                 if doc_id in master_index.get("documents", {}):
                     try:
                         # Retrieve the full document content from S3
@@ -269,28 +256,26 @@ def search():
                         results.append({
                             'url': document['url'],
                             'content': document.get('content', ''),
-                            'source': 'keyword_search',
-                            'relevance': score
+                            'source': 'keyword_search'
                         })
-                        logger.info(f"Found document with URL: {document['url']} (relevance: {score})")
+                        logger.info(f"Found document with URL: {document['url']}")
                     except Exception as e:
                         # If we can't get the content, at least return the URL
                         logger.warning(f"Error retrieving document {doc_id}: {str(e)}")
                         results.append({
                             'url': master_index["documents"][doc_id]["url"],
                             'content': '',
-                            'source': 'master_index_only',
-                            'relevance': score
+                            'source': 'master_index_only'
                         })
             
-            logger.info(f"Fast keyword search found {len(results)} top-ranking results")
+            logger.info(f"Fast keyword search found {len(results)} results")
             
             # If no results from keyword search, try full content search
             if not results:
                 logger.info("No results from keyword search, trying full content search")
                 
                 # Load and search individual document files
-                for doc_id in master_index.get("documents", {})[:20]:  # Limit to first 20 docs
+                for doc_id in master_index.get("documents", {}):
                     try:
                         doc_response = s3_client.get_object(
                             Bucket=S3_BUCKET_NAME,
@@ -298,29 +283,21 @@ def search():
                         )
                         document = json.loads(doc_response['Body'].read().decode('utf-8'))
                         
-                        # Check if query appears in content and calculate relevance
-                        content = document.get('content', '').lower()
-                        if content and query in content:
-                            # Simple relevance: frequency of query in content
-                            relevance = content.count(query)
+                        # Check if query appears in content
+                        if 'content' in document and query in document['content'].lower():
                             results.append({
                                 'url': document['url'],
                                 'content': document.get('content', ''),
-                                'source': 'full_content_search',
-                                'relevance': relevance
+                                'source': 'full_content_search'
                             })
-                            logger.info(f"Full content match in document: {document['url']} (relevance: {relevance})")
+                            logger.info(f"Full content match in document: {document['url']}")
                     except Exception as e:
                         logger.warning(f"Error loading document {doc_id}: {str(e)}")
                         continue
-                
-                # Sort by relevance and take top results
-                results = sorted(results, key=lambda x: x.get('relevance', 0), reverse=True)[:max_results]
-                
         except Exception as e:
             logger.warning(f"Error using master index: {str(e)}")
         
-        # If still no results, fall back to direct S3 search (less relevant)
+        # If still no results, fall back to direct S3 search
         if not results:
             logger.info("No results from optimized index, trying direct S3 search")
             
@@ -447,7 +424,7 @@ def search():
     # Don't check SQS queues as requested by user, focus only on S3 content
     
     # Return URL and content for each result
-    logger.info(f"Returning {len(results)} top search results")
+    logger.info(f"Returning {len(results)} search results")
     response = jsonify({"results": results})
     
     # Add CORS headers to prevent issues with ngrok
@@ -488,22 +465,8 @@ def status():
         try:
             s3_client.head_bucket(Bucket=S3_BUCKET_NAME)
             s3_status = "available"
-            
-            # Count indexed documents in S3
-            indexed_docs = 0
-            try:
-                response = s3_client.list_objects_v2(
-                    Bucket=S3_BUCKET_NAME,
-                    Prefix='searchable_index/documents/'
-                )
-                if 'Contents' in response:
-                    indexed_docs = len(response['Contents'])
-            except:
-                pass
-                
         except Exception:
             s3_status = "unavailable"
-            indexed_docs = 0
             
         status_data = {
             "urls_queue_size": urls_queue_size,
@@ -513,7 +476,6 @@ def status():
             "content_queue_visible": content_queue_visible,
             "content_queue_inflight": content_queue_inflight,
             "s3_status": s3_status,
-            "indexed_docs": indexed_docs,
             "timestamp": time.time()
         }
         
