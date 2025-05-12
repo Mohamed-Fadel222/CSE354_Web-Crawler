@@ -29,7 +29,7 @@ logger.info(f"Using S3 Bucket: {S3_BUCKET_NAME}")
 
 # Initialize AWS clients
 sqs_client = boto3.client('sqs', region_name=AWS_REGION)
-s3_client = boto3.client('s3', region_name=AWS_REGION)
+s3_client = boto3.client('s3', region_name=AWS_REGION)z
 
 # Message Tags
 MSG_TAG_INFO = 0       # Regular informational messages
@@ -284,7 +284,15 @@ class Indexer:
             # Get the document URLs
             for doc_id in matching_docs:
                 if doc_id in self.master_index["documents"]:
-                    results.append(self.master_index["documents"][doc_id]["url"])
+                    # Verify document actually exists in S3 before adding to results
+                    try:
+                        doc_key = f'searchable_index/documents/{doc_id}.json'
+                        s3_client.head_object(Bucket=S3_BUCKET_NAME, Key=doc_key)
+                        # Document exists, add to results
+                        results.append(self.master_index["documents"][doc_id]["url"])
+                    except Exception as e:
+                        logger.warning(f"Document {doc_id} referenced in master index but not found in S3: {str(e)}")
+                        continue
             
             logger.info(f"Quick search found {len(results)} results for '{query_text}'")
             

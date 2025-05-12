@@ -325,7 +325,7 @@ def search():
                 # Return a message indicating the search index is empty
                 return jsonify({
                     "results": [],
-                    "message": "The search index is empty. Please add some URLs to crawl first.",
+                    "message": "The search index is empty. Please add some URLs to crawl first or use /test/create-search-index to create sample data.",
                     "status": "empty_index"
                 })
         except Exception as e:
@@ -386,10 +386,19 @@ def search():
             for doc_id, score in top_docs:
                 if doc_id in master_index.get("documents", {}):
                     try:
+                        # Check if document actually exists in S3
+                        doc_key = f'searchable_index/documents/{doc_id}.json'
+                        try:
+                            # Verify document exists
+                            s3_client.head_object(Bucket=S3_BUCKET_NAME, Key=doc_key)
+                        except Exception as e:
+                            logger.warning(f"Document {doc_id} referenced in master index but not found in S3: {str(e)}")
+                            continue
+                        
                         # Retrieve the full document content from S3
                         doc_response = s3_client.get_object(
                             Bucket=S3_BUCKET_NAME,
-                            Key=f'searchable_index/documents/{doc_id}.json'
+                            Key=doc_key
                         )
                         document = json.loads(doc_response['Body'].read().decode('utf-8'))
                         
@@ -407,21 +416,8 @@ def search():
                         })
                         logger.info(f"Found document with URL: {document['url']} (relevance: {score}, tag: {tag_name})")
                     except Exception as e:
-                        # If we can't get the content, at least return the URL
                         logger.warning(f"Error retrieving document {doc_id}: {str(e)}")
-                        
-                        # Get tag if available in master index
-                        tag = master_index["documents"][doc_id].get('tag', MSG_TAG_CONTENT)
-                        tag_name = TAG_NAMES.get(tag, "Unknown")
-                        
-                        results.append({
-                            'url': master_index["documents"][doc_id]["url"],
-                            'content': '',
-                            'source': 'master_index_only',
-                            'relevance': score,
-                            'tag': tag,
-                            'tag_name': tag_name
-                        })
+                        continue  # Skip to next document instead of adding partial result
             
             logger.info(f"Fast keyword search found {len(results)} top-ranking results")
             
@@ -429,73 +425,30 @@ def search():
             if not results:
                 logger.info("No results from keyword search, trying full content search")
                 
-                # Load and search individual document files
-                for doc_id in master_index.get("documents", {})[:20]:  # Limit to first 20 docs
-                    try:
-                        doc_response = s3_client.get_object(
-                            Bucket=S3_BUCKET_NAME,
-                            Key=f'searchable_index/documents/{doc_id}.json'
-                        )
-                        document = json.loads(doc_response['Body'].read().decode('utf-8'))
-                        
-                        # Check if query appears in content and calculate relevance
-                        content = document.get('content', '').lower()
-                        if content and query in content:
-                            # Simple relevance: frequency of query in content
-                            relevance = content.count(query)
-                            
-                            # Get tag if available
-                            tag = document.get('tag', MSG_TAG_CONTENT)
-                            tag_name = TAG_NAMES.get(tag, "Unknown")
-                            
-                            results.append({
-                                'url': document['url'],
-                                'content': document.get('content', ''),
-                                'source': 'full_content_search',
-                                'relevance': relevance,
-                                'tag': tag,
-                                'tag_name': tag_name
-                            })
-                            logger.info(f"Full content match in document: {document['url']} (relevance: {relevance}, tag: {tag_name})")
-                    except Exception as e:
-                        logger.warning(f"Error loading document {doc_id}: {str(e)}")
-                        continue
+                # Load and search individual document files only from the proper index directory
+                response = s3_client.list_objects_v2(
+                    Bucket=S3_BUCKET_NAME,
+                    Prefix='searchable_index/documents/'
+                )
                 
-                # Sort by relevance and take top results
-                results = sorted(results, key=lambda x: x.get('relevance', 0), reverse=True)[:max_results]
-                
-        except Exception as e:
-            logger.warning(f"Error using master index: {str(e)}")
-        
-        # If still no results, fall back to direct S3 search (less relevant)
-        if not results:
-            logger.info("No results from optimized index, trying direct S3 search")
-            
-            # Try to list all objects in the documents directory
-            response = s3_client.list_objects_v2(
-                Bucket=S3_BUCKET_NAME,
-                Prefix='searchable_index/documents/'
-            )
-            
-            if 'Contents' in response:
-                logger.info(f"Found {len(response['Contents'])} documents in S3")
-                
-                # Look through document files
-                for obj in response['Contents'][:20]:  # Limit to 20 docs for performance
-                    key = obj['Key']
-                    
-                    if not key.endswith('.json'):
-                        continue
-                    
-                    try:
-                        obj_response = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=key)
-                        content = obj_response['Body'].read().decode('utf-8')
-                        
-                        # Try parsing as JSON
+                if 'Contents' in response:
+                    # Only examine actual JSON documents (not placeholders)
+                    for obj in [x for x in response.get('Contents', []) if x['Key'].endswith('.json')][:20]:
                         try:
-                            document = json.loads(content)
+                            doc_response = s3_client.get_object(
+                                Bucket=S3_BUCKET_NAME,
+                                Key=obj['Key']
+                            )
+                            document = json.loads(doc_response['Body'].read().decode('utf-8'))
+                            
+                            # Only consider documents with URL and content
                             if 'url' in document and 'content' in document:
-                                if query.lower() in document['content'].lower():
+                                # Check if query appears in content and calculate relevance
+                                content = document.get('content', '').lower()
+                                if content and query in content:
+                                    # Simple relevance: frequency of query in content
+                                    relevance = content.count(query)
+                                    
                                     # Get tag if available
                                     tag = document.get('tag', MSG_TAG_CONTENT)
                                     tag_name = TAG_NAMES.get(tag, "Unknown")
@@ -503,107 +456,27 @@ def search():
                                     results.append({
                                         'url': document['url'],
                                         'content': document.get('content', ''),
-                                        'source': 'direct_s3_search',
+                                        'source': 'full_content_search',
+                                        'relevance': relevance,
                                         'tag': tag,
                                         'tag_name': tag_name
                                     })
-                                    logger.info(f"Direct search match: {document['url']} (tag: {tag_name})")
-                        except json.JSONDecodeError:
+                                    logger.info(f"Full content match in document: {document['url']} (relevance: {relevance}, tag: {tag_name})")
+                        except Exception as e:
+                            logger.warning(f"Error in full content search for document {obj['Key']}: {str(e)}")
                             continue
-                    except Exception as e:
-                        logger.warning(f"Error processing document {key}: {str(e)}")
-                        continue
-        
-        # If we still have no results, fall back to searching in any S3 object
-        if not results:
-            logger.info("Trying fallback search in any S3 object")
-            
-            # Get a list of all objects
-            all_objects = []
-            paginator = s3_client.get_paginator('list_objects_v2')
-            
-            for page in paginator.paginate(Bucket=S3_BUCKET_NAME):
-                if 'Contents' in page:
-                    for obj in page['Contents']:
-                        if not (obj['Key'].endswith('.seg') or '_MAIN_' in obj['Key']):
-                            all_objects.append(obj)
-            
-            # Sort by last modified (newest first)
-            all_objects.sort(key=lambda x: x.get('LastModified', ''), reverse=True)
-            
-            # Check the 20 newest files first
-            for obj in all_objects[:20]:
-                key = obj['Key']
                 
-                try:
-                    obj_response = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=key)
-                    content = obj_response['Body'].read().decode('utf-8', errors='ignore')
-                    
-                    if query.lower() in content.lower():
-                        # Try to extract URL from content
-                        url = None
-                        tag = MSG_TAG_INFO  # Default tag
-                        
-                        # Try as JSON first
-                        try:
-                            data = json.loads(content)
-                            if isinstance(data, dict) and 'url' in data:
-                                url = data['url']
-                                tag = data.get('tag', MSG_TAG_CONTENT)
-                                # If this is a structured document, we want to include full content
-                                results.append({
-                                    'url': url,
-                                    'content': data.get('content', content[:1000]),
-                                    'source': f'fallback_json:{key}',
-                                    'tag': tag,
-                                    'tag_name': TAG_NAMES.get(tag, "Unknown")
-                                })
-                                logger.info(f"Fallback JSON search match: {url} (tag: {TAG_NAMES.get(tag, 'Unknown')})")
-                                continue
-                        except:
-                            pass
-                        
-                        # If not JSON, look for URL in text
-                        if not url and ('http://' in content or 'https://' in content):
-                            for line in content.split('\n'):
-                                if 'http://' in line or 'https://' in line:
-                                    start = line.find('http')
-                                    end = len(line)
-                                    for i in range(start, len(line)):
-                                        if i >= len(line) or line[i] in ' "\'\n\r\t<>':
-                                            end = i
-                                            break
-                                    url = line[start:end]
-                                    if url:
-                                        break
-                        
-                        # Use S3 object key if we still don't have a URL
-                        if not url:
-                            url = f"S3:{key}"
-                        
-                        # Add to results if not already there
-                        url_list = [r['url'] for r in results]
-                        if url and url not in url_list:
-                            results.append({
-                                'url': url,
-                                'content': content[:1000],
-                                'source': f'fallback_text:{key}',
-                                'tag': MSG_TAG_URL,
-                                'tag_name': TAG_NAMES[MSG_TAG_URL]
-                            })
-                            logger.info(f"Fallback text search match: {url} (tag: {TAG_NAMES[MSG_TAG_URL]})")
-                        
-                        # Stop at 10 results
-                        if len(results) >= 10:
-                            break
-                except Exception as e:
-                    logger.warning(f"Error in fallback search for {key}: {str(e)}")
-                    continue
+                # Sort by relevance and take top results
+                results = sorted(results, key=lambda x: x.get('relevance', 0), reverse=True)[:max_results]
+                
+        except Exception as e:
+            logger.warning(f"Error using master index: {str(e)}")
+        
+        # Remove all fallback mechanisms that might return phantom results
+        # The search should only return results from the proper index
     
     except Exception as e:
         logger.error(f"Error in search: {str(e)}")
-    
-    # Don't check SQS queues as requested by user, focus only on S3 content
     
     # Return URL and content for each result
     logger.info(f"Returning {len(results)} top search results")
@@ -1330,8 +1203,8 @@ def clear_cache():
 
 @app.route('/test/create-search-index')
 def create_search_index():
-    """Create example search content directly in the searchable_index structure
-    This is a quick way to populate the search index for testing without waiting for crawling"""
+    """Create an empty search index structure without any sample documents.
+    This initializes the necessary directories and empty index but allows the crawler to populate it naturally."""
     try:
         # Ensure the directories exist
         s3_client.put_object(
@@ -1346,84 +1219,38 @@ def create_search_index():
             Body=''
         )
         
-        # Create sample documents with diverse content
-        sample_docs = [
-            {
-                "url": "https://example.com/",
-                "content": "This is the Example Domain homepage. This domain is for use in illustrative examples in documents.",
-                "tag": MSG_TAG_CONTENT,
-                "tag_name": TAG_NAMES[MSG_TAG_CONTENT],
-                "keywords": ["example", "domain", "homepage", "illustrative"]
-            },
-            {
-                "url": "https://example.com/about",
-                "content": "About page for Example Domain. This website serves as a placeholder for various testing scenarios.",
-                "tag": MSG_TAG_CONTENT,
-                "tag_name": TAG_NAMES[MSG_TAG_CONTENT],
-                "keywords": ["about", "example", "domain", "placeholder", "testing"]
-            },
-            {
-                "url": "https://example.org/products",
-                "content": "Our products include web crawlers, search engines, and distributed systems components.",
-                "tag": MSG_TAG_CONTENT,
-                "tag_name": TAG_NAMES[MSG_TAG_CONTENT],
-                "keywords": ["products", "crawlers", "search", "engines", "distributed", "systems"]
-            },
-            {
-                "url": "https://example.net/blog/search-engines",
-                "content": "Modern search engines use distributed crawlers to index the web efficiently. This post explores crawler architecture.",
-                "tag": MSG_TAG_CONTENT,
-                "tag_name": TAG_NAMES[MSG_TAG_CONTENT],
-                "keywords": ["search", "engines", "distributed", "crawlers", "architecture"]
-            },
-            {
-                "url": "https://searchable-example.com/",
-                "content": "This is a searchable example website that demonstrates how the search functionality works in our distributed web crawler.",
-                "tag": MSG_TAG_CONTENT,
-                "tag_name": TAG_NAMES[MSG_TAG_CONTENT],
-                "keywords": ["searchable", "example", "search", "distributed", "crawler"]
-            }
-        ]
+        # Delete any existing master index and documents to clean the index
+        try:
+            # List and delete existing documents
+            response = s3_client.list_objects_v2(
+                Bucket=S3_BUCKET_NAME,
+                Prefix='searchable_index/documents/'
+            )
+            
+            if 'Contents' in response:
+                for obj in response['Contents']:
+                    if '.placeholder' not in obj['Key']:  # Keep placeholder files
+                        s3_client.delete_object(Bucket=S3_BUCKET_NAME, Key=obj['Key'])
+                        logger.info(f"Deleted existing document: {obj['Key']}")
+                
+            # Delete master index
+            s3_client.delete_object(
+                Bucket=S3_BUCKET_NAME,
+                Key='searchable_index/master_index.json'
+            )
+            logger.info("Deleted existing master index")
+        except Exception as e:
+            logger.warning(f"Error cleaning existing index: {str(e)}")
         
-        # Create master index structure
+        # Create empty master index structure
         master_index = {
             "last_updated": time.time(),
-            "document_count": len(sample_docs),
+            "document_count": 0,
             "documents": {},
             "keywords": {}
         }
         
-        # Add documents to S3 and update master index
-        for doc in sample_docs:
-            # Generate document ID
-            doc_id = hashlib.md5(doc["url"].encode()).hexdigest()
-            
-            # Add timestamp
-            doc["timestamp"] = time.time()
-            doc["id"] = doc_id
-            
-            # Upload document to S3
-            s3_client.put_object(
-                Bucket=S3_BUCKET_NAME,
-                Key=f'searchable_index/documents/{doc_id}.json',
-                Body=json.dumps(doc),
-                ContentType='application/json'
-            )
-            
-            # Add to master index
-            master_index["documents"][doc_id] = {
-                "url": doc["url"],
-                "timestamp": doc["timestamp"],
-                "tag": doc["tag"]
-            }
-            
-            # Add keyword mappings
-            for keyword in doc.get("keywords", []):
-                if keyword not in master_index["keywords"]:
-                    master_index["keywords"][keyword] = []
-                master_index["keywords"][keyword].append(doc_id)
-        
-        # Save master index
+        # Save empty master index
         s3_client.put_object(
             Bucket=S3_BUCKET_NAME,
             Key='searchable_index/master_index.json',
@@ -1433,9 +1260,9 @@ def create_search_index():
         
         return jsonify({
             "status": "success",
-            "message": f"Created search index with {len(sample_docs)} sample documents",
-            "documents": [doc["url"] for doc in sample_docs],
-            "keywords": list(master_index["keywords"].keys())
+            "message": "Created empty search index structure. Ready for crawler to populate naturally.",
+            "documents": [],
+            "keywords": []
         })
     except Exception as e:
         logger.error(f"Error creating search index: {str(e)}")
