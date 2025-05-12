@@ -3,13 +3,14 @@ import logging
 import requests
 from bs4 import BeautifulSoup
 import boto3
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlunparse
 import os
 from dotenv import load_dotenv
 import json
 import urllib3
 import warnings
 import uuid
+import re
 
 # Suppress warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -56,20 +57,145 @@ class Crawler:
         
         # Domain crawl limits - track URLs per domain
         self.domain_url_counts = {}
-        self.max_urls_per_domain = 50  # Increased from 10 to 50 to ensure more complete domain coverage
+        self.max_urls_per_domain = 50  # Increased from 10 to 50
         
-    def should_crawl_url(self, url):
-        """Check if we should crawl this URL based on domain limits"""
-        if url in self.visited_urls:
+        # Anti-loop measures
+        self.max_crawl_depth = 10  # Maximum depth from seed URL
+        self.path_segment_limit = 5  # Max number of repeated path segments
+        
+    def normalize_url(self, url):
+        """
+        Normalize URLs to avoid crawling the same page with different URL formats
+        - Remove fragments
+        - Make protocol lowercase
+        - Remove default ports
+        - Remove trailing slashes where appropriate
+        """
+        try:
+            parsed = urlparse(url)
+            
+            # Convert scheme and netloc to lowercase
+            scheme = parsed.scheme.lower()
+            netloc = parsed.netloc.lower()
+            
+            # Remove default ports (80 for http, 443 for https)
+            if netloc.endswith(':80') and scheme == 'http':
+                netloc = netloc[:-3]
+            elif netloc.endswith(':443') and scheme == 'https':
+                netloc = netloc[:-4]
+                
+            # Handle path normalization
+            path = parsed.path
+            if path == '':
+                path = '/'
+            elif path != '/' and path.endswith('/'):
+                path = path[:-1]
+                
+            # Remove fragments
+            fragment = ''
+            
+            # Keep query parameters but sort them
+            query = '&'.join(sorted(parsed.query.split('&')))
+            
+            # Rebuild the URL
+            normalized = urlunparse((scheme, netloc, path, parsed.params, query, fragment))
+            return normalized
+            
+        except Exception as e:
+            logger.error(f"Error normalizing URL {url}: {str(e)}")
+            return url
+            
+    def detect_url_cycle(self, url):
+        """Detect cycles in URL paths to prevent crawler traps"""
+        try:
+            parsed = urlparse(url)
+            path = parsed.path
+            
+            # Split path into segments
+            segments = [s for s in path.split('/') if s]
+            
+            # Check for repeated segments
+            segment_counts = {}
+            for segment in segments:
+                if segment in segment_counts:
+                    segment_counts[segment] += 1
+                    if segment_counts[segment] > self.path_segment_limit:
+                        logger.warning(f"[Crawler-{self.crawler_id}] Detected URL cycle in {url} - too many repeated segments")
+                        return True
+                else:
+                    segment_counts[segment] = 1
+                    
+            # Check for calendar patterns which often cause loops
+            # Common patterns: /yyyy/mm/dd, /yyyy/mm, etc.
+            calendar_pattern = re.compile(r'/\d{4}/\d{2}(/\d{2})?')
+            calendar_matches = calendar_pattern.findall(path)
+            if len(calendar_matches) > 2:
+                logger.warning(f"[Crawler-{self.crawler_id}] Detected potential calendar trap in {url}")
+                return True
+                
             return False
             
-        domain = self.get_domain_from_url(url)
+        except Exception as e:
+            logger.error(f"Error detecting URL cycle for {url}: {str(e)}")
+            return False
+            
+    def check_crawl_depth(self, url, source_url):
+        """Check the crawl depth of a URL relative to its source"""
+        # This is a simplified implementation
+        # In a production system, we'd track the actual depth from seed URLs
+        
+        # If source URL is from a different domain, treat as seed (depth 0)
+        source_domain = self.get_domain_from_url(source_url) if source_url else None
+        url_domain = self.get_domain_from_url(url)
+        
+        if not source_domain or not url_domain or source_domain != url_domain:
+            return 0
+            
+        # Simple but effective heuristic:
+        # Compare URL path segments to estimate depth
+        try:
+            source_path = urlparse(source_url).path.strip('/')
+            url_path = urlparse(url).path.strip('/')
+            
+            source_segments = len([s for s in source_path.split('/') if s])
+            url_segments = len([s for s in url_path.split('/') if s])
+            
+            # If new URL has many more segments, it's likely deeper
+            if url_segments > source_segments + 2:
+                logger.warning(f"[Crawler-{self.crawler_id}] URL {url} appears to be too deep compared to source {source_url}")
+                return url_segments
+            
+            return url_segments
+        except:
+            return 0
+
+    def should_crawl_url(self, url, source_url=None):
+        """Check if we should crawl this URL based on domain limits and anti-loop measures"""
+        # Normalize URL first
+        normalized_url = self.normalize_url(url)
+        
+        # Check if already visited
+        if normalized_url in self.visited_urls:
+            logger.info(f"[Crawler-{self.crawler_id}] Already visited normalized URL: {normalized_url}")
+            return False
+            
+        domain = self.get_domain_from_url(normalized_url)
         if not domain:
             return False
             
         # Check if we've reached domain limit
         if domain in self.domain_url_counts and self.domain_url_counts[domain] >= self.max_urls_per_domain:
-            logger.info(f"[Crawler-{self.crawler_id}] Skipping {url} - reached limit of {self.max_urls_per_domain} URLs for domain {domain}")
+            logger.info(f"[Crawler-{self.crawler_id}] Skipping {normalized_url} - reached limit of {self.max_urls_per_domain} URLs for domain {domain}")
+            return False
+            
+        # Check for URL cycles/traps
+        if self.detect_url_cycle(normalized_url):
+            logger.info(f"[Crawler-{self.crawler_id}] Skipping {normalized_url} - potential crawler trap detected")
+            return False
+            
+        # Check crawl depth if source URL is provided
+        if source_url and self.check_crawl_depth(normalized_url, source_url) > self.max_crawl_depth:
+            logger.info(f"[Crawler-{self.crawler_id}] Skipping {normalized_url} - exceeded maximum crawl depth")
             return False
             
         return True
@@ -103,7 +229,6 @@ class Crawler:
             
             for link in all_links:
                 href = link['href']
-                # Make sure we handle relative URLs properly
                 absolute_url = urljoin(base_url, href)
                 parsed_url = urlparse(absolute_url)
                 
@@ -111,23 +236,12 @@ class Crawler:
                 if (parsed_url.netloc == base_domain and 
                     self.is_valid_url(absolute_url) and 
                     absolute_url not in self.visited_urls):
-                    # Special handling for important paths we want to ensure are crawled
-                    # We prioritize key paths like webinars, blog, documentation, etc.
-                    priority_paths = ['/events/', '/webinars/', '/faq/', '/blog/', '/about/', '/documentation/']
-                    is_priority = any(path in parsed_url.path for path in priority_paths)
-                    
-                    if is_priority:
-                        # Insert priority URLs at the beginning to ensure they're crawled
-                        urls.insert(0, absolute_url)
-                        logger.info(f"[Crawler-{self.crawler_id}] Found priority URL: {absolute_url}")
-                    else:
-                        urls.append(absolute_url)
+                    urls.append(absolute_url)
             
-            # Ensure we're keeping enough URLs to reach important content
-            # but still respecting a reasonable limit
+            # Increased limit from 10 to 30 URLs per page
             original_count = len(urls)
-            urls = urls[:20]  # Increased from 10 to 20
-            logger.info(f"[Crawler-{self.crawler_id}] Extracted {original_count} internal URLs from {base_url}, keeping {len(urls)} max")
+            urls = urls[:30]
+            logger.info(f"[Crawler-{self.crawler_id}] Extracted {original_count} internal URLs from {base_url}, keeping 30 max")
             
             # Log the actual URLs being returned
             for idx, url in enumerate(urls):
@@ -170,45 +284,42 @@ class Crawler:
         except:
             return None
 
-    def process_url(self, url):
+    def process_url(self, url, source_url=None):
         """
         Process a URL by crawling it and sending discovered URLs to the queue
         """
+        # Normalize URL
+        normalized_url = self.normalize_url(url)
+        
         # Check if we should crawl this URL
-        domain = self.get_domain_from_url(url)
+        if not self.should_crawl_url(normalized_url, source_url):
+            logger.info(f"[Crawler-{self.crawler_id}] Skipping URL: {normalized_url}")
+            return
+            
+        domain = self.get_domain_from_url(normalized_url)
         if not domain:
-            logger.warning(f"[Crawler-{self.crawler_id}] Invalid domain for URL: {url}")
+            logger.warning(f"[Crawler-{self.crawler_id}] Invalid domain for URL: {normalized_url}")
             return
             
-        # Skip if already visited
-        if url in self.visited_urls:
-            logger.info(f"[Crawler-{self.crawler_id}] Already visited {url}, skipping")
-            return
-            
-        # Check domain limits
-        if domain in self.domain_url_counts and self.domain_url_counts[domain] >= self.max_urls_per_domain:
-            logger.info(f"[Crawler-{self.crawler_id}] Skipping {url} - reached limit of {self.max_urls_per_domain} URLs for domain {domain}")
-            return
-
-        logger.info(f"[Crawler-{self.crawler_id}] Processing URL: {url}")
-        self.visited_urls.add(url)
+        logger.info(f"[Crawler-{self.crawler_id}] Processing URL: {normalized_url}")
+        self.visited_urls.add(normalized_url)
         
         # Update domain counter
         self.domain_url_counts[domain] = self.domain_url_counts.get(domain, 0) + 1
         logger.info(f"[Crawler-{self.crawler_id}] Domain {domain}: {self.domain_url_counts[domain]}/{self.max_urls_per_domain} URLs processed")
         
         # Fetch and parse the page
-        html = self.fetch_page(url)
+        html = self.fetch_page(normalized_url)
         if html:
             # Extract URLs and text content
-            extracted_urls = self.extract_urls(html, url)
+            extracted_urls = self.extract_urls(html, normalized_url)
             extracted_text = self.extract_text(html)
             
             if extracted_text:
                 # Send content to indexer queue
                 message_body = {
                     'tag': MSG_TAG_CONTENT,  # Tag for content messages
-                    'url': url,
+                    'url': normalized_url,
                     'content': extracted_text[:5000],  # Increased content size
                     'timestamp': time.time()
                 }
@@ -218,7 +329,7 @@ class Crawler:
                         QueueUrl=SQS_QUEUE_URL,
                         MessageBody=json.dumps(message_body)
                     )
-                    logger.info(f"[Crawler-{self.crawler_id}] Sent content to indexer queue for {url} (MessageId: {response.get('MessageId')})")
+                    logger.info(f"[Crawler-{self.crawler_id}] Sent content to indexer queue for {normalized_url} (MessageId: {response.get('MessageId')})")
                 except Exception as e:
                     logger.error(f"[Crawler-{self.crawler_id}] Error sending to indexer queue: {str(e)}")
             
@@ -226,29 +337,46 @@ class Crawler:
             if extracted_urls:
                 urls_queued = 0
                 for new_url in extracted_urls:
-                    new_domain = self.get_domain_from_url(new_url)
+                    # Normalize the new URL
+                    normalized_new_url = self.normalize_url(new_url)
+                    
+                    # Skip if already in visited set
+                    if normalized_new_url in self.visited_urls:
+                        continue
+                        
+                    new_domain = self.get_domain_from_url(normalized_new_url)
                     
                     # Only queue if we haven't hit the domain limit yet
                     current_count = self.domain_url_counts.get(new_domain, 0)
                     if current_count < self.max_urls_per_domain:
+                        # Skip if URL appears to be part of a crawler trap
+                        if self.detect_url_cycle(normalized_new_url):
+                            logger.info(f"[Crawler-{self.crawler_id}] Skipping {normalized_new_url} - potential crawler trap")
+                            continue
+                            
+                        # Skip if URL exceeds max depth
+                        if self.check_crawl_depth(normalized_new_url, normalized_url) > self.max_crawl_depth:
+                            logger.info(f"[Crawler-{self.crawler_id}] Skipping {normalized_new_url} - exceeds max depth")
+                            continue
+                            
                         try:
                             response = sqs_client.send_message(
                                 QueueUrl=SQS_URLS_QUEUE,
                                 MessageBody=json.dumps({
                                     'tag': MSG_TAG_URL,  # Tag for URL messages
-                                    'url': new_url,
-                                    'source_url': url,
+                                    'url': normalized_new_url,
+                                    'source_url': normalized_url,
                                     'timestamp': time.time()
                                 })
                             )
                             urls_queued += 1
-                            logger.info(f"[Crawler-{self.crawler_id}] Queued new URL for crawling: {new_url} (MessageId: {response.get('MessageId')})")
+                            logger.info(f"[Crawler-{self.crawler_id}] Queued new URL for crawling: {normalized_new_url} (MessageId: {response.get('MessageId')})")
                         except Exception as e:
-                            logger.error(f"[Crawler-{self.crawler_id}] Error queuing URL {new_url}: {str(e)}")
+                            logger.error(f"[Crawler-{self.crawler_id}] Error queuing URL {normalized_new_url}: {str(e)}")
                     else:
-                        logger.info(f"[Crawler-{self.crawler_id}] Skipping {new_url} - domain {new_domain} reached limit of {self.max_urls_per_domain}")
+                        logger.info(f"[Crawler-{self.crawler_id}] Skipping {normalized_new_url} - domain {new_domain} reached limit of {self.max_urls_per_domain}")
                 
-                logger.info(f"[Crawler-{self.crawler_id}] SUCCESS: Queued {urls_queued} URLs from {url} for further crawling")
+                logger.info(f"[Crawler-{self.crawler_id}] SUCCESS: Queued {urls_queued} URLs from {normalized_url} for further crawling")
                             
         # Implement crawl delay
         time.sleep(self.crawl_delay)
@@ -300,12 +428,13 @@ def crawler_process():
                     try:
                         body = json.loads(message['Body'])
                         url = body['url']
-                        tag = body.get('tag', MSG_TAG_URL)  # Default to URL tag if not specified
+                        source_url = body.get('source_url', None)  # Get source URL if available
+                        tag = body.get('tag', MSG_TAG_URL)
                         
                         logger.info(f"[Crawler-{crawler.crawler_id}] Received URL from queue: {url} (MessageId: {message_id}, Tag: {tag})")
                         
-                        # Process the URL (fetches content and queues discovered URLs)
-                        crawler.process_url(url)
+                        # Process the URL with source information
+                        crawler.process_url(url, source_url)
                         
                         # Delete the message from the queue after successful processing
                         sqs_client.delete_message(

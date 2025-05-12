@@ -191,21 +191,7 @@ class Indexer:
         words = content.lower().split()
         # Filter out common words and short words
         stopwords = {'the', 'a', 'an', 'in', 'on', 'at', 'to', 'for', 'with', 'by', 'of', 'and', 'or', 'is', 'are'}
-        
-        # Extract standard keywords (words longer than 3 chars that aren't stopwords)
         keywords = [word for word in words if word not in stopwords and len(word) > 3]
-        
-        # Also extract potential names (capitalized words, even if shorter)
-        # First get the original case words to identify names
-        original_words = content.split()
-        for word in original_words:
-            # Check if the word starts with uppercase and is not at the beginning of a sentence
-            if len(word) > 1 and word[0].isupper() and word[1:].islower():
-                # Names are often 2+ consecutive capitalized words
-                word_lower = word.lower()
-                if word_lower not in stopwords and word_lower not in keywords:
-                    keywords.append(word_lower)
-        
         # Return unique keywords
         return list(set(keywords))
 
