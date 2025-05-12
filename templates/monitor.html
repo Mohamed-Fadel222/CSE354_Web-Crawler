@@ -10,15 +10,15 @@
             padding-top: 20px;
             padding-bottom: 40px;
         }
-        .tag-0 { background-color: #6c757d; color: white; }  /* Info - gray */
-        .tag-1 { background-color: #0d6efd; color: white; }  /* URL - blue */
-        .tag-2 { background-color: #198754; color: white; }  /* Content - green */
-        .tag-99 { background-color: #ffc107; color: black; } /* Warning - yellow */
-        .tag-999 { background-color: #dc3545; color: white; } /* Error - red */
+        .tag-0 { background-color: #6c757d; color: white; } /* Info */
+        .tag-1 { background-color: #007bff; color: white; } /* URL */
+        .tag-2 { background-color: #28a745; color: white; } /* Content */
+        .tag-99 { background-color: #ffc107; color: black; } /* Warning */
+        .tag-999 { background-color: #dc3545; color: white; } /* Error */
         
         .tag {
             display: inline-block;
-            padding: 0.25em 0.4em;
+            padding: 0.25em 0.6em;
             font-size: 75%;
             font-weight: 700;
             line-height: 1;
@@ -26,13 +26,12 @@
             white-space: nowrap;
             vertical-align: baseline;
             border-radius: 0.25rem;
+            margin-right: 5px;
         }
-        
         .status-chart {
             height: 300px;
             margin-bottom: 20px;
         }
-        
         .url-list {
             max-height: 400px;
             overflow-y: auto;
@@ -142,7 +141,7 @@
         };
         
         // Tag names map
-        const tagNames = {
+        let tagNames = {
             '0': 'Info',
             '1': 'URL',
             '2': 'Content',
@@ -172,54 +171,63 @@
                 .then(response => response.json())
                 .then(data => {
                     const statusHtml = `
-                        <h5>Queue Status</h5>
-                        <table class="table">
-                            <tr>
-                                <td>URLs Queue</td>
-                                <td>${data.urls_queue_size}</td>
-                            </tr>
-                            <tr>
-                                <td>URLs In Flight</td>
-                                <td>${data.urls_queue_inflight}</td>
-                            </tr>
-                            <tr>
-                                <td>Content Queue</td>
-                                <td>${data.content_queue_size}</td>
-                            </tr>
-                            <tr>
-                                <td>Content In Flight</td>
-                                <td>${data.content_queue_inflight}</td>
-                            </tr>
-                        </table>
-                        
-                        <h5>Storage Status</h5>
-                        <table class="table">
-                            <tr>
-                                <td>S3 Status</td>
-                                <td>${data.s3_status}</td>
-                            </tr>
-                            <tr>
-                                <td>Indexed Documents</td>
-                                <td>${data.indexed_docs}</td>
-                            </tr>
-                        </table>
-                        
-                        <h5>Message Types</h5>
-                        <table class="table">
-                            <tr>
-                                <th>Type</th>
-                                <th>Count</th>
-                            </tr>
-                            ${Object.entries(data.message_tags || {}).map(([tag, count]) => `
-                                <tr>
-                                    <td>${formatTag(tag)}</td>
-                                    <td>${count}</td>
-                                </tr>
-                            `).join('')}
-                        </table>
+                        <div class="row">
+                            <div class="col-md-6">
+                                <h5>Queue Status</h5>
+                                <ul class="list-group">
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        URLs Queue
+                                        <span class="badge bg-primary rounded-pill">${data.urls_queue_size}</span>
+                                    </li>
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        URLs In Flight
+                                        <span class="badge bg-info rounded-pill">${data.urls_queue_inflight}</span>
+                                    </li>
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        Content Queue
+                                        <span class="badge bg-primary rounded-pill">${data.content_queue_size}</span>
+                                    </li>
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        Content In Flight
+                                        <span class="badge bg-info rounded-pill">${data.content_queue_inflight}</span>
+                                    </li>
+                                </ul>
+                            </div>
+                            <div class="col-md-6">
+                                <h5>Storage Status</h5>
+                                <ul class="list-group">
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        S3 Status
+                                        <span class="badge bg-${data.s3_status === 'available' ? 'success' : 'danger'} rounded-pill">${data.s3_status}</span>
+                                    </li>
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        Indexed Documents
+                                        <span class="badge bg-primary rounded-pill">${data.indexed_docs}</span>
+                                    </li>
+                                </ul>
+                            </div>
+                        </div>
+                        <div class="row mt-3">
+                            <div class="col-12">
+                                <h5>Message Tags</h5>
+                                <ul class="list-group">
+                                    ${Object.entries(data.message_tags || {}).map(([tag, count]) => `
+                                        <li class="list-group-item d-flex justify-content-between align-items-center">
+                                            ${formatTag(tag)} Messages
+                                            <span class="badge bg-primary rounded-pill">${count}</span>
+                                        </li>
+                                    `).join('')}
+                                </ul>
+                            </div>
+                        </div>
                     `;
                     
                     document.getElementById('statusContainer').innerHTML = statusHtml;
+                    
+                    // Update tag names if available
+                    if (data.tag_names) {
+                        tagNames = data.tag_names;
+                    }
                     
                     // Update tag distribution chart
                     updateTagChart(data.message_tags || {});
@@ -374,9 +382,9 @@
             fetchStatus();
             fetchUrls();
             
-            // Set up polling for updates
-            setInterval(fetchStatus, STATUS_REFRESH_INTERVAL);
-            setInterval(fetchUrls, URLS_REFRESH_INTERVAL);
+            // Set up polling for updates with faster refresh rates
+            setInterval(fetchStatus, STATUS_REFRESH_INTERVAL); // Update status every 2 seconds
+            setInterval(fetchUrls, URLS_REFRESH_INTERVAL);   // Update URLs every 5 seconds
         });
     </script>
 </body>

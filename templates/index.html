@@ -5,20 +5,22 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Web Crawler Dashboard</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         body {
             padding-top: 20px;
             padding-bottom: 40px;
+            background-color: #f8f9fa;
         }
-        .tag-0 { background-color: #6c757d; color: white; }  /* Info - gray */
-        .tag-1 { background-color: #0d6efd; color: white; }  /* URL - blue */
-        .tag-2 { background-color: #198754; color: white; }  /* Content - green */
-        .tag-99 { background-color: #ffc107; color: black; } /* Warning - yellow */
-        .tag-999 { background-color: #dc3545; color: white; } /* Error - red */
+        .tag-0 { background-color: #6c757d; color: white; } /* Info */
+        .tag-1 { background-color: #007bff; color: white; } /* URL */
+        .tag-2 { background-color: #28a745; color: white; } /* Content */
+        .tag-99 { background-color: #ffc107; color: black; } /* Warning */
+        .tag-999 { background-color: #dc3545; color: white; } /* Error */
         
         .tag {
             display: inline-block;
-            padding: 0.25em 0.4em;
+            padding: 0.25em 0.6em;
             font-size: 75%;
             font-weight: 700;
             line-height: 1;
@@ -26,15 +28,14 @@
             white-space: nowrap;
             vertical-align: baseline;
             border-radius: 0.25rem;
+            margin-right: 5px;
         }
-        
         .search-result {
             margin-bottom: 20px;
             padding: 15px;
             border: 1px solid #ddd;
             border-radius: 5px;
         }
-        
         .search-content {
             max-height: 200px;
             overflow-y: auto;
@@ -43,30 +44,137 @@
             background-color: #f9f9f9;
             margin-top: 10px;
         }
+        .status-chart {
+            height: 300px;
+            margin-bottom: 20px;
+        }
+        #statusContainer {
+            margin-bottom: 30px;
+        }
+        .url-list {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .card {
+            box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+            margin-bottom: 1rem;
+            border: none;
+            border-radius: 0.5rem;
+        }
+        .card-header {
+            background-color: #fff;
+            border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+            font-weight: 600;
+            padding: 1rem;
+            border-top-left-radius: 0.5rem !important;
+            border-top-right-radius: 0.5rem !important;
+        }
+        .card-body {
+            padding: 1.25rem;
+        }
+        .navbar {
+            border-radius: 0.5rem;
+            box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+        }
+        .btn {
+            border-radius: 0.3rem;
+            font-weight: 500;
+        }
+        .btn-primary {
+            background-color: #0d6efd;
+            border-color: #0d6efd;
+        }
+        .btn-secondary {
+            background-color: #6c757d;
+            border-color: #6c757d;
+        }
+        h1, h5 {
+            font-weight: 600;
+        }
+        .badge {
+            padding: 0.5em 0.8em;
+            font-weight: 600;
+        }
+        .list-group-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.75rem 1.25rem;
+        }
+        .table {
+            margin-bottom: 0;
+        }
+        .section-toggle {
+            cursor: pointer;
+        }
+        .section-toggle:after {
+            font-family: "Font Awesome 6 Free";
+            content: "\f077";
+            float: right;
+            font-weight: 900;
+        }
+        .section-toggle.collapsed:after {
+            content: "\f078";
+        }
+        .table-responsive {
+            border-radius: 0.3rem;
+        }
+        .table thead th {
+            border-top: 0;
+            background-color: #f8f9fa;
+        }
+        .refresh-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-left: 5px;
+            background-color: #28a745;
+        }
+        .pulse {
+            animation: pulse-animation 1s infinite;
+        }
+        @keyframes pulse-animation {
+            0% {
+                opacity: 1;
+            }
+            50% {
+                opacity: 0.3;
+            }
+            100% {
+                opacity: 1;
+            }
+        }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1 class="mb-4">Web Crawler Dashboard</h1>
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1>Web Crawler Dashboard</h1>
+            <div class="refresh-status">
+                <small class="text-muted">Auto-refreshing</small>
+                <span class="refresh-indicator pulse" id="refreshIndicator"></span>
+            </div>
+        </div>
         
         <div class="row mb-4">
             <div class="col-12">
                 <nav class="navbar navbar-expand-lg navbar-light bg-light mb-3">
                     <div class="container-fluid">
-                        <span class="navbar-brand">Navigation</span>
+                        <span class="navbar-brand"><i class="fas fa-sitemap me-2"></i>Navigation</span>
                         <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
                             <span class="navbar-toggler-icon"></span>
                         </button>
                         <div class="collapse navbar-collapse" id="navbarNav">
                             <ul class="navbar-nav">
                                 <li class="nav-item">
-                                    <a class="nav-link active" href="/">Dashboard</a>
+                                    <a class="nav-link active" href="/"><i class="fas fa-home me-1"></i>Dashboard</a>
                                 </li>
                                 <li class="nav-item">
-                                    <a class="nav-link" href="/monitor">System Monitor</a>
+                                    <a class="nav-link" href="/monitor"><i class="fas fa-chart-line me-1"></i>System Monitor</a>
                                 </li>
                                 <li class="nav-item">
-                                    <a class="nav-link" href="/search-page">Search Page</a>
+                                    <a class="nav-link" href="/search-page"><i class="fas fa-search me-1"></i>Search Page</a>
                                 </li>
                             </ul>
                         </div>
@@ -79,9 +187,16 @@
         <div class="row mb-4">
             <div class="col-12">
                 <div class="alert alert-warning">
-                    <strong>Database appears to be empty!</strong> 
-                    Search results may not be available until content is crawled.
-                    <a href="/clear-cache" class="btn btn-sm btn-outline-secondary float-end">Refresh State</a>
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div>
+                            <i class="fas fa-exclamation-triangle me-2"></i>
+                            <strong>Database appears to be empty!</strong> 
+                            Search results may not be available until content is crawled.
+                        </div>
+                        <a href="/clear-cache" class="btn btn-sm btn-outline-secondary">
+                            <i class="fas fa-sync-alt me-1"></i>Refresh State
+                        </a>
+                    </div>
                 </div>
             </div>
         </div>
@@ -90,29 +205,39 @@
         <div class="row mb-4">
             <div class="col-md-6">
                 <div class="card">
-                    <div class="card-header">Add URL to Crawl</div>
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <span><i class="fas fa-plus-circle me-2"></i>Add URL to Crawl</span>
+                    </div>
                     <div class="card-body">
                         <form id="addUrlForm">
                             <div class="mb-3">
                                 <label for="url" class="form-label">URL</label>
-                                <input type="url" class="form-control" id="url" placeholder="https://example.com" required>
+                                <div class="input-group">
+                                    <span class="input-group-text"><i class="fas fa-link"></i></span>
+                                    <input type="url" class="form-control" id="url" placeholder="https://example.com" required>
+                                </div>
                             </div>
-                            <button type="submit" class="btn btn-primary">Add URL</button>
+                            <button type="submit" class="btn btn-primary"><i class="fas fa-plus me-1"></i>Add URL</button>
                         </form>
                     </div>
                 </div>
             </div>
             <div class="col-md-6">
                 <div class="card">
-                    <div class="card-header">Search</div>
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <span><i class="fas fa-search me-2"></i>Search</span>
+                    </div>
                     <div class="card-body">
                         <form id="searchForm" action="/search-page" method="get">
                             <div class="mb-3">
                                 <label for="query" class="form-label">Search Query</label>
-                                <input type="text" class="form-control" id="query" name="query" placeholder="Enter search terms" required>
+                                <div class="input-group">
+                                    <span class="input-group-text"><i class="fas fa-search"></i></span>
+                                    <input type="text" class="form-control" id="query" name="query" placeholder="Enter search terms" required>
+                                </div>
                             </div>
-                            <button type="submit" class="btn btn-primary">Search</button>
-                        </form>
+                            <button type="submit" class="btn btn-primary"><i class="fas fa-search me-1"></i>Search</button>
+  </form>
                     </div>
                 </div>
             </div>
@@ -121,52 +246,16 @@
         <div class="row mb-4">
             <div class="col-12">
                 <div class="card">
-                    <div class="card-header">System Status</div>
-                    <div class="card-body" id="statusContainer">
-                        <div class="text-center">
-                            <div class="spinner-border" role="status">
-                                <span class="visually-hidden">Loading...</span>
-                            </div>
-                            <p>Loading status...</p>
-                        </div>
+                    <div class="card-header section-toggle" data-bs-toggle="collapse" data-bs-target="#statusSection">
+                        <i class="fas fa-server me-2"></i>System Status
                     </div>
-                </div>
-            </div>
-        </div>
-        
-        <div class="row mb-4">
-            <div class="col-12">
-                <div class="card">
-                    <div class="card-header">Message Tag Distribution</div>
-                    <div class="card-body">
-                        <canvas id="tagDistributionChart" height="300"></canvas>
-                    </div>
-                </div>
-            </div>
-        </div>
-        
-        <div class="row mb-4">
-            <div class="col-12">
-                <div class="card">
-                    <div class="card-header">Search Results</div>
-                    <div class="card-body" id="searchResults">
-                        <p class="text-center">Search for something to see results here.</p>
-                    </div>
-                </div>
-            </div>
-        </div>
-        
-        <div class="row mb-4">
-            <div class="col-12">
-                <div class="card">
-                    <div class="card-header">Available URLs</div>
-                    <div class="card-body">
-                        <div id="urlList" style="max-height: 400px; overflow-y: auto;">
+                    <div id="statusSection" class="collapse show">
+                        <div class="card-body" id="statusContainer">
                             <div class="text-center">
                                 <div class="spinner-border" role="status">
                                     <span class="visually-hidden">Loading...</span>
                                 </div>
-                                <p>Loading URLs...</p>
+                                <p>Loading status...</p>
                             </div>
                         </div>
                     </div>
@@ -177,12 +266,68 @@
         <div class="row mb-4">
             <div class="col-12">
                 <div class="card">
-                    <div class="card-header">Test Functions</div>
-                    <div class="card-body">
-                        <button id="insertExampleBtn" class="btn btn-secondary">Insert Example Data</button>
-                        <a href="/test/check-aws" class="btn btn-secondary">Check AWS</a>
-                        <a href="/test/aws-resources" class="btn btn-secondary">List AWS Resources</a>
-                        <a href="/test/direct-search" class="btn btn-secondary">Direct Search</a>
+                    <div class="card-header section-toggle" data-bs-toggle="collapse" data-bs-target="#chartSection">
+                        <i class="fas fa-chart-bar me-2"></i>Message Tag Distribution
+                    </div>
+                    <div id="chartSection" class="collapse show">
+                        <div class="card-body">
+                            <canvas id="tagDistributionChart" class="status-chart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header section-toggle" data-bs-toggle="collapse" data-bs-target="#searchResultsSection">
+                        <i class="fas fa-list me-2"></i>Search Results
+                    </div>
+                    <div id="searchResultsSection" class="collapse show">
+                        <div class="card-body" id="searchResults">
+                            <p class="text-center">Search for something to see results here.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header section-toggle" data-bs-toggle="collapse" data-bs-target="#urlsSection">
+                        <i class="fas fa-globe me-2"></i>Available URLs
+                    </div>
+                    <div id="urlsSection" class="collapse show">
+                        <div class="card-body">
+                            <div id="urlList" class="url-list">
+                                <div class="text-center">
+                                    <div class="spinner-border" role="status">
+                                        <span class="visually-hidden">Loading...</span>
+                                    </div>
+                                    <p>Loading URLs...</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header section-toggle" data-bs-toggle="collapse" data-bs-target="#testFunctionsSection">
+                        <i class="fas fa-vials me-2"></i>Test Functions
+                    </div>
+                    <div id="testFunctionsSection" class="collapse">
+                        <div class="card-body">
+                            <button id="insertExampleBtn" class="btn btn-secondary me-2"><i class="fas fa-database me-1"></i>Insert Example Data</button>
+                            <a href="/test/check-aws" class="btn btn-secondary me-2"><i class="fas fa-cloud me-1"></i>Check AWS</a>
+                            <a href="/test/aws-resources" class="btn btn-secondary me-2"><i class="fas fa-list-ul me-1"></i>List AWS Resources</a>
+                            <a href="/test/direct-search" class="btn btn-secondary"><i class="fas fa-search me-1"></i>Direct Search</a>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -202,7 +347,7 @@
         };
         
         // Tag names map
-        const tagNames = {
+        let tagNames = {
             '0': 'Info',
             '1': 'URL',
             '2': 'Content',
@@ -231,57 +376,64 @@
                 .then(response => response.json())
                 .then(data => {
                     const statusHtml = `
-                        <h5>Queue Status</h5>
-                        <table class="table">
-                            <tr>
-                                <td>URLs Queue</td>
-                                <td>${data.urls_queue_size}</td>
-                            </tr>
-                            <tr>
-                                <td>URLs In Flight</td>
-                                <td>${data.urls_queue_inflight}</td>
-                            </tr>
-                            <tr>
-                                <td>Content Queue</td>
-                                <td>${data.content_queue_size}</td>
-                            </tr>
-                            <tr>
-                                <td>Content In Flight</td>
-                                <td>${data.content_queue_inflight}</td>
-                            </tr>
-                        </table>
-                        
-                        <h5>Storage Status</h5>
-                        <table class="table">
-                            <tr>
-                                <td>S3 Status</td>
-                                <td>${data.s3_status}</td>
-                            </tr>
-                            <tr>
-                                <td>Indexed Documents</td>
-                                <td>${data.indexed_docs}</td>
-                            </tr>
-                        </table>
-                        
-                        <h5>Message Types</h5>
-                        <table class="table">
-                            <tr>
-                                <th>Type</th>
-                                <th>Count</th>
-                            </tr>
-                            ${Object.entries(data.message_tags || {}).map(([tag, count]) => `
-                                <tr>
-                                    <td>${formatTag(tag)}</td>
-                                    <td>${count}</td>
-                                </tr>
-                            `).join('')}
-                        </table>
+                        <div class="row">
+                            <div class="col-md-6">
+                                <h5><i class="fas fa-tasks me-2"></i>Queue Status</h5>
+                                <ul class="list-group">
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        <span><i class="fas fa-link me-1"></i>URLs Queue</span>
+                                        <span class="badge bg-primary rounded-pill">${data.urls_queue_size}</span>
+                                    </li>
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        <span><i class="fas fa-file-alt me-1"></i>Content Queue</span>
+                                        <span class="badge bg-primary rounded-pill">${data.content_queue_size}</span>
+                                    </li>
+                                </ul>
+                            </div>
+                            <div class="col-md-6">
+                                <h5><i class="fas fa-database me-2"></i>Storage Status</h5>
+                                <ul class="list-group">
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        <span><i class="fas fa-cloud me-1"></i>S3 Status</span>
+                                        <span class="badge bg-${data.s3_status === 'available' ? 'success' : 'danger'} rounded-pill">${data.s3_status}</span>
+                                    </li>
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        <span><i class="fas fa-file me-1"></i>Indexed Documents</span>
+                                        <span class="badge bg-primary rounded-pill">${data.indexed_docs}</span>
+                                    </li>
+                                </ul>
+                            </div>
+                        </div>
+                        <div class="row mt-3">
+                            <div class="col-12">
+                                <h5><i class="fas fa-tags me-2"></i>Message Tags</h5>
+                                <ul class="list-group">
+                                    ${Object.entries(data.message_tags || {}).map(([tag, count]) => `
+                                        <li class="list-group-item d-flex justify-content-between align-items-center">
+                                            ${formatTag(tag)} Messages
+                                            <span class="badge bg-primary rounded-pill">${count}</span>
+                                        </li>
+                                    `).join('')}
+                                </ul>
+                            </div>
+                        </div>
                     `;
                     
                     document.getElementById('statusContainer').innerHTML = statusHtml;
                     
+                    // Update tag names if available
+                    if (data.tag_names) {
+                        tagNames = data.tag_names;
+                    }
+                    
                     // Update tag distribution chart
                     updateTagChart(data.message_tags || {});
+
+                    // Pulse the refresh indicator
+                    document.getElementById('refreshIndicator').classList.add('pulse');
+                    setTimeout(() => {
+                        document.getElementById('refreshIndicator').classList.remove('pulse');
+                    }, 500);
                 })
                 .catch(error => {
                     console.error('Error fetching status:', error);
@@ -328,6 +480,11 @@
                                 precision: 0
                             }
                         }
+                    },
+                    plugins: {
+                        legend: {
+                            display: false
+                        }
                     }
                 }
             });
@@ -338,33 +495,38 @@
             fetch('/list-urls')
                 .then(response => response.json())
                 .then(data => {
+                    // Update tag names if available
+                    if (data.tag_mapping) {
+                        tagNames = data.tag_mapping;
+                    }
+                    
                     if (data.urls && data.urls.length > 0) {
                         const urlsHtml = `
-                            <table class="table table-striped">
-                                <thead>
-                                    <tr>
-                                        <th>URL</th>
-                                        <th>Tag</th>
-                                        <th>Source</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    ${data.urls.map(url => `
+                            <div class="table-responsive">
+                                <table class="table table-striped">
+                                    <thead>
                                         <tr>
-                                            <td><a href="${url.url}" target="_blank">${url.url}</a></td>
-                                            <td>${formatTag(url.tag)}</td>
-                                            <td>${url.source}</td>
+                                            <th>URL</th>
+                                            <th>Tag</th>
+                                            <th>Source</th>
                                         </tr>
-                                    `).join('')}
-                                </tbody>
-                            </table>
-                            <p class="text-muted">Total: ${data.count} URLs</p>
+                                    </thead>
+                                    <tbody>
+                                        ${data.urls.map(item => `
+                                            <tr>
+                                                <td><a href="${item.url}" target="_blank">${item.url}</a></td>
+                                                <td>${formatTag(item.tag)}</td>
+                                                <td>${item.source}</td>
+                                            </tr>
+                                        `).join('')}
+                                    </tbody>
+                                </table>
+                            </div>
+                            <p class="text-muted mt-2">Total: ${data.count} URLs</p>
                         `;
                         document.getElementById('urlList').innerHTML = urlsHtml;
                     } else {
-                        document.getElementById('urlList').innerHTML = `
-                            <div class="alert alert-warning">No URLs available.</div>
-                        `;
+                        document.getElementById('urlList').innerHTML = '<div class="alert alert-info">No URLs found in the system.</div>';
                     }
                 })
                 .catch(error => {
@@ -391,19 +553,21 @@
                 .then(data => {
                     if (data.results && data.results.length > 0) {
                         const resultsHtml = `
-                            <h5>Found ${data.results.length} results for "${query}"</h5>
+                            <h5><i class="fas fa-search me-2"></i>Found ${data.results.length} results for "${query}"</h5>
                             ${data.results.map((result, index) => `
                                 <div class="search-result">
-                                    <h5 class="mb-1">
-                                        <a href="${result.url}" target="_blank">${result.url}</a>
+                                    <div class="d-flex justify-content-between align-items-center">
+                                        <h5 class="mb-1">
+                                            <a href="${result.url}" target="_blank">${result.url}</a>
+                                        </h5>
                                         ${formatTag(result.tag || 2)}
-                                    </h5>
+                                    </div>
                                     <div class="search-content">
                                         <pre>${result.content || 'No content available'}</pre>
                                     </div>
                                     <div class="mt-2 text-muted">
-                                        Source: ${result.source}
-                                        ${result.relevance ? ` | Relevance: ${result.relevance}` : ''}
+                                        <i class="fas fa-info-circle me-1"></i>Source: ${result.source}
+                                        ${result.relevance ? ` | <i class="fas fa-star me-1"></i>Relevance: ${result.relevance}` : ''}
                                     </div>
                                 </div>
                             `).join('')}
@@ -411,14 +575,14 @@
                         document.getElementById('searchResults').innerHTML = resultsHtml;
                     } else {
                         document.getElementById('searchResults').innerHTML = `
-                            <div class="alert alert-warning">No results found for "${query}"</div>
+                            <div class="alert alert-warning"><i class="fas fa-exclamation-triangle me-2"></i>No results found for "${query}"</div>
                         `;
                     }
                 })
                 .catch(error => {
                     console.error('Error searching:', error);
                     document.getElementById('searchResults').innerHTML = `
-                        <div class="alert alert-danger">Error searching: ${error}</div>
+                        <div class="alert alert-danger"><i class="fas fa-exclamation-circle me-2"></i>Error searching: ${error}</div>
                     `;
                 });
         }
@@ -435,7 +599,27 @@
             .then(response => response.json())
             .then(data => {
                 if (data.status === 'success') {
-                    alert(`URL added successfully! ${data.message}`);
+                    // Show success message with Bootstrap toast
+                    const toastHtml = `
+                        <div class="position-fixed bottom-0 end-0 p-3" style="z-index: 11">
+                            <div class="toast show align-items-center text-white bg-success border-0" role="alert" aria-live="assertive" aria-atomic="true">
+                                <div class="d-flex">
+                                    <div class="toast-body">
+                                        <i class="fas fa-check-circle me-2"></i>${data.message}
+                                    </div>
+                                    <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                    const toastContainer = document.createElement('div');
+                    toastContainer.innerHTML = toastHtml;
+                    document.body.appendChild(toastContainer);
+                    
+                    // Auto-remove toast after 3 seconds
+                    setTimeout(() => {
+                        document.body.removeChild(toastContainer);
+                    }, 3000);
                     
                     // Refresh status and URL list
                     fetchStatus();
@@ -459,11 +643,36 @@
                 .then(response => response.json())
                 .then(data => {
                     if (data.status === 'success') {
-                        alert(`Example data inserted successfully! ${data.message}`);
+                        // Show success message
+                        const toastHtml = `
+                            <div class="position-fixed bottom-0 end-0 p-3" style="z-index: 11">
+                                <div class="toast show align-items-center text-white bg-success border-0" role="alert" aria-live="assertive" aria-atomic="true">
+                                    <div class="d-flex">
+                                        <div class="toast-body">
+                                            <i class="fas fa-check-circle me-2"></i>${data.message}
+                                        </div>
+                                        <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                        const toastContainer = document.createElement('div');
+                        toastContainer.innerHTML = toastHtml;
+                        document.body.appendChild(toastContainer);
+                        
+                        // Auto-remove toast after 3 seconds
+                        setTimeout(() => {
+                            document.body.removeChild(toastContainer);
+                        }, 3000);
                         
                         // Refresh status and URL list
                         fetchStatus();
                         fetchUrls();
+                        
+                        // Update tag names if available
+                        if (data.tag_mapping) {
+                            tagNames = data.tag_mapping;
+                        }
                     } else {
                         alert(`Error: ${data.error}`);
                     }
@@ -480,7 +689,7 @@
             fetchStatus();
             fetchUrls();
             
-            // Set up polling for updates
+            // Set up polling for status updates with faster refresh rates
             setInterval(fetchStatus, STATUS_REFRESH_INTERVAL);
             setInterval(fetchUrls, URLS_REFRESH_INTERVAL);
             
@@ -505,6 +714,14 @@
             // Insert example data button
             document.getElementById('insertExampleBtn').addEventListener('click', function() {
                 insertExampleData();
+            });
+            
+            // Initialize collapsible sections
+            const collapseSections = document.querySelectorAll('.section-toggle');
+            collapseSections.forEach(section => {
+                section.addEventListener('click', function() {
+                    this.classList.toggle('collapsed');
+                });
             });
         });
     </script>
