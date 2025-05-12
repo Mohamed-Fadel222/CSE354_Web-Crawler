@@ -88,6 +88,25 @@ class Crawler:
             logger.error(f"[Crawler-{self.crawler_id}] Unexpected error fetching {url}: {str(e)}")
             return None
 
+    def normalize_url(self, url):
+        """
+        Normalize URL to prevent duplicate entries by handling trailing slashes, 
+        fragments and other URL variations that represent the same content
+        """
+        try:
+            parsed = urlparse(url)
+            # Remove fragments
+            normalized = parsed._replace(fragment='')
+            # Convert to string and handle trailing slashes consistently
+            result = normalized.geturl()
+            # Strip trailing slash unless it's the only path component
+            if result.endswith('/') and parsed.path != '/':
+                if len(parsed.path) > 1:
+                    result = result[:-1]
+            return result
+        except Exception:
+            return url  # Return original if normalization fails
+
     def extract_urls(self, html, base_url):
         if not html:
             return []
@@ -101,16 +120,26 @@ class Crawler:
             all_links = soup.find_all('a', href=True)
             logger.info(f"[Crawler-{self.crawler_id}] Found {len(all_links)} total links on {base_url}")
             
+            # Set to track URLs we've already seen in this function to avoid duplicates
+            seen_urls = set()
+            
             for link in all_links:
                 href = link['href']
                 # Make sure we handle relative URLs properly
                 absolute_url = urljoin(base_url, href)
-                parsed_url = urlparse(absolute_url)
+                # Normalize URL to avoid different forms of the same URL
+                normalized_url = self.normalize_url(absolute_url)
+                parsed_url = urlparse(normalized_url)
                 
-                # Only follow URLs from the same domain
+                # Skip already seen URLs in this extraction or globally visited
+                if normalized_url in seen_urls:
+                    continue
+                seen_urls.add(normalized_url)
+                
+                # Only follow URLs from the same domain that haven't been visited
                 if (parsed_url.netloc == base_domain and 
-                    self.is_valid_url(absolute_url) and 
-                    absolute_url not in self.visited_urls):
+                    self.is_valid_url(normalized_url) and 
+                    normalized_url not in self.visited_urls):
                     # Special handling for important paths we want to ensure are crawled
                     # We prioritize key paths like webinars, blog, documentation, etc.
                     priority_paths = ['/events/', '/webinars/', '/faq/', '/blog/', '/about/', '/documentation/']
@@ -118,10 +147,10 @@ class Crawler:
                     
                     if is_priority:
                         # Insert priority URLs at the beginning to ensure they're crawled
-                        urls.insert(0, absolute_url)
-                        logger.info(f"[Crawler-{self.crawler_id}] Found priority URL: {absolute_url}")
+                        urls.insert(0, normalized_url)
+                        logger.info(f"[Crawler-{self.crawler_id}] Found priority URL: {normalized_url}")
                     else:
-                        urls.append(absolute_url)
+                        urls.append(normalized_url)
             
             # Ensure we're keeping enough URLs to reach important content
             # but still respecting a reasonable limit
@@ -174,6 +203,9 @@ class Crawler:
         """
         Process a URL by crawling it and sending discovered URLs to the queue
         """
+        # Normalize URL
+        url = self.normalize_url(url)
+        
         # Check if we should crawl this URL
         domain = self.get_domain_from_url(url)
         if not domain:
@@ -224,13 +256,20 @@ class Crawler:
             
             # Queue all discovered URLs to the URLs queue (letting master node handle them)
             if extracted_urls:
+                # Track how many URLs we've already queued for each domain in this session
                 urls_queued = 0
+                urls_queued_per_domain = {}
                 for new_url in extracted_urls:
                     new_domain = self.get_domain_from_url(new_url)
                     
                     # Only queue if we haven't hit the domain limit yet
                     current_count = self.domain_url_counts.get(new_domain, 0)
-                    if current_count < self.max_urls_per_domain:
+                    domain_queue_count = urls_queued_per_domain.get(new_domain, 0)
+                    
+                    # Limit URLs queued per domain in one processing cycle to prevent flooding
+                    max_queue_per_domain = 10
+                    
+                    if current_count < self.max_urls_per_domain and domain_queue_count < max_queue_per_domain:
                         try:
                             response = sqs_client.send_message(
                                 QueueUrl=SQS_URLS_QUEUE,
@@ -242,9 +281,13 @@ class Crawler:
                                 })
                             )
                             urls_queued += 1
+                            # Update domain counter for this queue operation
+                            urls_queued_per_domain[new_domain] = domain_queue_count + 1
                             logger.info(f"[Crawler-{self.crawler_id}] Queued new URL for crawling: {new_url} (MessageId: {response.get('MessageId')})")
                         except Exception as e:
                             logger.error(f"[Crawler-{self.crawler_id}] Error queuing URL {new_url}: {str(e)}")
+                    elif domain_queue_count >= max_queue_per_domain:
+                        logger.info(f"[Crawler-{self.crawler_id}] Skipping {new_url} - already queued {domain_queue_count} URLs for domain {new_domain} in this cycle")
                     else:
                         logger.info(f"[Crawler-{self.crawler_id}] Skipping {new_url} - domain {new_domain} reached limit of {self.max_urls_per_domain}")
                 
@@ -272,6 +315,9 @@ def crawler_process():
     logger.info("*** Crawler node started - Processing URLs and sending discovered URLs to queue ***")
     logger.info("*** FLOW: 1) Pull URLs from queue → 2) Crawl each URL → 3) Extract links → 4) Send links back to queue ***")
     crawler = Crawler()
+    
+    # Keep track of URLs we've already seen in this process to prevent duplicates in SQS
+    processed_urls = set()
     
     # Optional: Test URL extraction on a specific URL
     # crawler.test_extract_and_queue("https://example.com")
@@ -302,17 +348,32 @@ def crawler_process():
                         url = body['url']
                         tag = body.get('tag', MSG_TAG_URL)  # Default to URL tag if not specified
                         
-                        logger.info(f"[Crawler-{crawler.crawler_id}] Received URL from queue: {url} (MessageId: {message_id}, Tag: {tag})")
+                        # Normalize URL before processing
+                        normalized_url = crawler.normalize_url(url)
+                        
+                        # Check if we've already processed this URL in this crawler process
+                        if normalized_url in processed_urls:
+                            logger.info(f"[Crawler-{crawler.crawler_id}] Already processed {normalized_url} in this crawler process, skipping")
+                            # Delete the message since we've already processed this URL
+                            sqs_client.delete_message(
+                                QueueUrl=SQS_URLS_QUEUE,
+                                ReceiptHandle=receipt_handle
+                            )
+                            logger.info(f"[Crawler-{crawler.crawler_id}] Successfully deleted duplicate message for {normalized_url}")
+                            continue
+                        
+                        logger.info(f"[Crawler-{crawler.crawler_id}] Received URL from queue: {normalized_url} (MessageId: {message_id}, Tag: {tag})")
+                        processed_urls.add(normalized_url)
                         
                         # Process the URL (fetches content and queues discovered URLs)
-                        crawler.process_url(url)
+                        crawler.process_url(normalized_url)
                         
                         # Delete the message from the queue after successful processing
                         sqs_client.delete_message(
                             QueueUrl=SQS_URLS_QUEUE,
                             ReceiptHandle=receipt_handle
                         )
-                        logger.info(f"[Crawler-{crawler.crawler_id}] Successfully processed and deleted message for {url}")
+                        logger.info(f"[Crawler-{crawler.crawler_id}] Successfully processed and deleted message for {normalized_url}")
                         
                     except json.JSONDecodeError as e:
                         # Send error message to queue

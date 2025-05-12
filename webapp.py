@@ -10,6 +10,13 @@ import base64
 import time
 import requests
 import hashlib
+import re
+from concurrent.futures import ThreadPoolExecutor
+import urllib3
+import random
+
+# Suppress insecure warnings for demo
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Load environment variables
 load_dotenv()
@@ -36,13 +43,22 @@ MSG_TAG_CONTENT = 2    # Content processing messages
 MSG_TAG_WARNING = 99   # Warning messages
 MSG_TAG_ERROR = 999    # Error messages
 
-# Map tags to human-readable names
+# Tag names for display
 TAG_NAMES = {
-    MSG_TAG_INFO: "Info",
-    MSG_TAG_URL: "URL",
-    MSG_TAG_CONTENT: "Content",
-    MSG_TAG_WARNING: "Warning",
-    MSG_TAG_ERROR: "Error"
+    str(MSG_TAG_INFO): "Info",
+    str(MSG_TAG_URL): "URL",
+    str(MSG_TAG_CONTENT): "Content", 
+    str(MSG_TAG_WARNING): "Warning",
+    str(MSG_TAG_ERROR): "Error"
+}
+
+# Tag classes for display
+TAG_CLASSES = {
+    str(MSG_TAG_INFO): "secondary",
+    str(MSG_TAG_URL): "primary",
+    str(MSG_TAG_CONTENT): "success", 
+    str(MSG_TAG_WARNING): "warning",
+    str(MSG_TAG_ERROR): "danger"
 }
 
 # Initialize AWS clients
@@ -52,10 +68,13 @@ s3_client = boto3.client('s3', region_name=AWS_REGION)
 # Initialize Flask app
 app = Flask(__name__)
 
-# Global cache for URLs (to avoid repeated S3/SQS queries)
-url_cache = []
-last_cache_update = 0
-CACHE_TTL = 60  # seconds
+# URL cache to reduce AWS calls during development
+url_cache = {}
+url_cache_timestamp = 0
+URL_CACHE_TTL = 5  # seconds
+
+# In-memory search cache
+search_cache = {}
 
 @app.route('/')
 def index():
@@ -106,14 +125,14 @@ def add_url():
 
 def refresh_url_cache():
     """Update the global URL cache from both SQS and S3"""
-    global url_cache, last_cache_update
+    global url_cache, url_cache_timestamp
     
     # Check if cache is still fresh
     current_time = time.time()
-    if current_time - last_cache_update < CACHE_TTL and url_cache:
+    if current_time - url_cache_timestamp < URL_CACHE_TTL and url_cache:
         return url_cache
     
-    new_cache = []
+    new_cache = {}
     logger.info("Refreshing URL cache")
     
     # 1. Get URLs from content queue
@@ -136,12 +155,11 @@ def refresh_url_cache():
                     tag_name = TAG_NAMES.get(tag, "Unknown")
                     
                     if 'url' in body:
-                        new_cache.append({
-                            'url': body['url'],
+                        new_cache[body['url']] = {
                             'source': 'SQS Content Queue',
                             'tag': tag,
                             'tag_name': tag_name
-                        })
+                        }
                         logger.info(f"Found URL in SQS: {body['url']} (Tag: {tag_name})")
                     
                     # Return message to queue
@@ -199,12 +217,11 @@ def refresh_url_cache():
                                 tag = data.get('tag', MSG_TAG_CONTENT)
                                 tag_name = TAG_NAMES.get(tag, "Unknown")
                                 
-                                new_cache.append({
-                                    'url': data['url'],
+                                new_cache[data['url']] = {
                                     'source': f'S3:{key}',
                                     'tag': tag,
                                     'tag_name': tag_name
-                                })
+                                }
                                 logger.info(f"Found URL in S3 JSON: {data['url']} (Tag: {tag_name})")
                         except json.JSONDecodeError:
                             # Not JSON, look for URLs in the text
@@ -215,12 +232,11 @@ def refresh_url_cache():
                                         url_candidate = line[url_start:].split()[0].strip()
                                         # Basic URL validation
                                         if ' ' not in url_candidate and url_candidate.startswith('http'):
-                                            new_cache.append({
-                                                'url': url_candidate,
+                                            new_cache[url_candidate] = {
                                                 'source': f'S3:{key} (text)',
                                                 'tag': MSG_TAG_URL,
                                                 'tag_name': TAG_NAMES[MSG_TAG_URL]
-                                            })
+                                            }
                                             logger.info(f"Found URL in S3 text: {url_candidate}")
                                             break
                     except Exception as e:
@@ -249,12 +265,11 @@ def refresh_url_cache():
                     tag_name = TAG_NAMES.get(tag, "Unknown")
                     
                     if 'url' in body:
-                        new_cache.append({
-                            'url': body['url'],
+                        new_cache[body['url']] = {
                             'source': 'SQS URLs Queue',
                             'tag': tag,
                             'tag_name': tag_name
-                        })
+                        }
                         logger.info(f"Found URL in URLs queue: {body['url']} (Tag: {tag_name})")
                     
                     # Return message to queue
@@ -270,7 +285,7 @@ def refresh_url_cache():
     
     # Update the cache
     url_cache = new_cache
-    last_cache_update = current_time
+    url_cache_timestamp = current_time
     logger.info(f"URL cache refreshed with {len(url_cache)} URLs")
     return url_cache
 
@@ -525,7 +540,7 @@ def list_urls():
                 "tag_name": entry.get('tag_name', 'Unknown'),
                 "source": entry.get('source', 'Unknown')
             } 
-            for entry in urls
+            for entry in urls.values()
         ],
         "count": len(urls),
         "tag_mapping": TAG_NAMES  # Include tag mapping for UI display
@@ -533,50 +548,66 @@ def list_urls():
 
 @app.route('/status')
 def status():
-    """Get system status"""
+    """Return system status information as JSON"""
     try:
-        # Force a fresh request for queue attributes (no caching)
-        urls_queue_attrs = sqs_client.get_queue_attributes(
-            QueueUrl=SQS_URLS_QUEUE,
-            AttributeNames=['ApproximateNumberOfMessages', 'ApproximateNumberOfMessagesNotVisible']
-        )
-        
-        content_queue_attrs = sqs_client.get_queue_attributes(
-            QueueUrl=SQS_QUEUE_URL,
-            AttributeNames=['ApproximateNumberOfMessages', 'ApproximateNumberOfMessagesNotVisible']
-        )
-        
-        # Get both visible and in-flight messages
-        urls_queue_visible = int(urls_queue_attrs['Attributes']['ApproximateNumberOfMessages'])
-        urls_queue_inflight = int(urls_queue_attrs['Attributes']['ApproximateNumberOfMessagesNotVisible'])
-        urls_queue_size = urls_queue_visible + urls_queue_inflight
-        
-        content_queue_visible = int(content_queue_attrs['Attributes']['ApproximateNumberOfMessages'])
-        content_queue_inflight = int(content_queue_attrs['Attributes']['ApproximateNumberOfMessagesNotVisible'])
-        content_queue_size = content_queue_visible + content_queue_inflight
-        
-        # Log the actual values for debugging
-        logger.info(f"URLs Queue: {urls_queue_visible} visible + {urls_queue_inflight} in flight = {urls_queue_size} total")
-        logger.info(f"Content Queue: {content_queue_visible} visible + {content_queue_inflight} in flight = {content_queue_size} total")
-        
-        # Check S3 bucket status
+        # Gather queue information
         try:
-            s3_client.head_bucket(Bucket=S3_BUCKET_NAME)
+            # Check URLs queue
+            urls_queue_info = sqs_client.get_queue_attributes(
+                QueueUrl=SQS_URLS_QUEUE,
+                AttributeNames=['ApproximateNumberOfMessages', 'ApproximateNumberOfMessagesNotVisible']
+            )
+            
+            urls_queue_size = int(urls_queue_info['Attributes'].get('ApproximateNumberOfMessages', '0'))
+            urls_queue_inflight = int(urls_queue_info['Attributes'].get('ApproximateNumberOfMessagesNotVisible', '0'))
+            urls_queue_visible = urls_queue_size
+            
+            # Check content queue
+            content_queue_info = sqs_client.get_queue_attributes(
+                QueueUrl=SQS_QUEUE_URL,
+                AttributeNames=['ApproximateNumberOfMessages', 'ApproximateNumberOfMessagesNotVisible']
+            )
+            
+            content_queue_size = int(content_queue_info['Attributes'].get('ApproximateNumberOfMessages', '0'))
+            content_queue_inflight = int(content_queue_info['Attributes'].get('ApproximateNumberOfMessagesNotVisible', '0'))
+            content_queue_visible = content_queue_size
+            
+            logger.info(f"Queue status: URLs: {urls_queue_size}, Content: {content_queue_size}")
+            
+        except Exception as e:
+            logger.error(f"Error getting queue status: {str(e)}")
+            urls_queue_size = 0
+            content_queue_size = 0
+            urls_queue_visible = 0
+            urls_queue_inflight = 0
+            content_queue_visible = 0
+            content_queue_inflight = 0
+        
+        # Check S3 status
+        try:
+            # Test S3 connectivity by listing bucket objects
+            response = s3_client.list_objects_v2(
+                Bucket=S3_BUCKET_NAME,
+                MaxKeys=1
+            )
+            
             s3_status = "available"
             
-            # Count indexed documents in S3
-            indexed_docs = 0
-            try:
-                response = s3_client.list_objects_v2(
-                    Bucket=S3_BUCKET_NAME,
-                    Prefix='searchable_index/documents/'
-                )
-                if 'Contents' in response:
-                    indexed_docs = len(response['Contents'])
-            except:
-                pass
+            # Get number of indexed documents
+            index_response = s3_client.list_objects_v2(
+                Bucket=S3_BUCKET_NAME,
+                Prefix='searchable_index/documents/'
+            )
+            
+            if 'Contents' in index_response:
+                indexed_docs = len([obj for obj in index_response['Contents'] if obj['Key'].endswith('.json')])
+            else:
+                indexed_docs = 0
                 
-        except Exception:
+            logger.info(f"S3 status: available, Indexed docs: {indexed_docs}")
+            
+        except Exception as e:
+            logger.error(f"Error checking S3 status: {str(e)}")
             s3_status = "unavailable"
             indexed_docs = 0
             
@@ -653,74 +684,6 @@ def status():
         except Exception as e:
             logger.error(f"Error sampling URL queue: {str(e)}")
         
-        # Check content queue for message tags
-        try:
-            if content_queue_visible > 0:
-                response = sqs_client.receive_message(
-                    QueueUrl=SQS_QUEUE_URL,
-                    MaxNumberOfMessages=min(10, content_queue_visible),
-                    VisibilityTimeout=5,
-                    WaitTimeSeconds=1
-                )
-                
-                if 'Messages' in response:
-                    # Reset content-related tag counts based on actual messages
-                    message_tags_count[str(MSG_TAG_CONTENT)] = 0
-                    message_tags_count[str(MSG_TAG_INFO)] = 0
-                    message_tags_count[str(MSG_TAG_WARNING)] = 0
-                    message_tags_count[str(MSG_TAG_ERROR)] = 0
-                    
-                    for message in response['Messages']:
-                        try:
-                            body = json.loads(message['Body'])
-                            tag = str(body.get('tag', MSG_TAG_CONTENT))  # Default to content tag
-                            message_tags_count[tag] = message_tags_count.get(tag, 0) + 1
-                            logger.info(f"Found message with tag: {tag}, body: {body}")
-                            
-                            # Return message to queue
-                            sqs_client.change_message_visibility(
-                                QueueUrl=SQS_QUEUE_URL,
-                                ReceiptHandle=message['ReceiptHandle'],
-                                VisibilityTimeout=0
-                            )
-                        except Exception as e:
-                            logger.error(f"Error reading message tag from content queue: {str(e)}")
-                    
-                    logger.info(f"Updated tag counts from content queue sample: {message_tags_count}")
-            
-        except Exception as e:
-            logger.error(f"Error sampling content queue: {str(e)}")
-            
-        # Also check S3 for document tags
-        try:
-            # Count tags in indexed documents
-            response = s3_client.list_objects_v2(
-                Bucket=S3_BUCKET_NAME,
-                Prefix='searchable_index/documents/',
-                MaxKeys=10  # Just sample 10 documents
-            )
-            
-            if 'Contents' in response:
-                for obj in response['Contents'][:10]:
-                    try:
-                        obj_response = s3_client.get_object(
-                            Bucket=S3_BUCKET_NAME, 
-                            Key=obj['Key']
-                        )
-                        content = obj_response['Body'].read().decode('utf-8')
-                        doc = json.loads(content)
-                        
-                        if 'tag' in doc:
-                            tag = str(doc['tag'])
-                            # Increment the tag count
-                            message_tags_count[tag] = message_tags_count.get(tag, 0) + 1
-                    except Exception as e:
-                        logger.error(f"Error reading document tag from S3: {str(e)}")
-                        
-                logger.info(f"Updated tag counts from S3 document sample: {message_tags_count}")
-        except Exception as e:
-            logger.error(f"Error sampling S3 documents: {str(e)}")
-            
         # Make sure all keys are strings for JSON serialization
         message_tags_count = {str(k): v for k, v in message_tags_count.items()}
             
@@ -735,6 +698,7 @@ def status():
             "indexed_docs": indexed_docs,
             "message_tags": message_tags_count,
             "tag_names": TAG_NAMES,
+            "tag_classes": TAG_CLASSES,
             "timestamp": time.time()
         }
         
@@ -1185,9 +1149,9 @@ def search_page():
     # Check if we need to clear cache first
     clear = request.args.get('clear_cache', '').lower() in ['true', '1', 'yes']
     if clear:
-        global url_cache, last_cache_update
-        url_cache = []
-        last_cache_update = 0
+        global url_cache, url_cache_timestamp
+        url_cache = {}
+        url_cache_timestamp = 0
         logger.info("URL cache cleared from search page")
     
     results = []
@@ -1210,11 +1174,11 @@ def search_page():
 @app.route('/clear-cache')
 def clear_cache():
     """Clear the URL cache and force a refresh from S3/SQS"""
-    global url_cache, last_cache_update
+    global url_cache, url_cache_timestamp
     
     # Reset the cache
-    url_cache = []
-    last_cache_update = 0
+    url_cache = {}
+    url_cache_timestamp = 0
     logger.info("URL cache has been manually cleared")
     
     # Force a refresh of the cache
