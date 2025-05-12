@@ -362,11 +362,12 @@ def search():
             
             # Use the keyword-based fast search
             query_words = query.lower().split()
+            query_phrase = query.lower()  # Keep the entire phrase for exact matching
             matching_docs = {}  # Use a dict to track relevance scores
             
             # Check if any keywords match
             for word in query_words:
-                if len(word) > 3 and word in master_index.get("keywords", {}):
+                if len(word) > 2 and word in master_index.get("keywords", {}):  # Reduced min length to 3->2
                     for doc_id in master_index["keywords"][word]:
                         # Increase relevance score for each keyword match
                         if doc_id not in matching_docs:
@@ -405,6 +406,11 @@ def search():
                         # Get tag and tag name
                         tag = document.get('tag', MSG_TAG_CONTENT)
                         tag_name = TAG_NAMES.get(tag, "Unknown")
+                        
+                        # Boost score for exact phrase matches (important for names)
+                        content = document.get('content', '').lower()
+                        if query_phrase in content:
+                            score += 10  # Significant boost for exact matches
                         
                         results.append({
                             'url': document['url'],
@@ -445,9 +451,10 @@ def search():
                             if 'url' in document and 'content' in document:
                                 # Check if query appears in content and calculate relevance
                                 content = document.get('content', '').lower()
-                                if content and query in content:
-                                    # Simple relevance: frequency of query in content
-                                    relevance = content.count(query)
+                                
+                                # Look for exact phrase matches first
+                                if query_phrase in content:
+                                    relevance = 10 + content.count(query_phrase) * 5  # Higher relevance for phrase matches
                                     
                                     # Get tag if available
                                     tag = document.get('tag', MSG_TAG_CONTENT)
@@ -456,12 +463,30 @@ def search():
                                     results.append({
                                         'url': document['url'],
                                         'content': document.get('content', ''),
-                                        'source': 'full_content_search',
+                                        'source': 'full_content_search_phrase',
                                         'relevance': relevance,
                                         'tag': tag,
                                         'tag_name': tag_name
                                     })
-                                    logger.info(f"Full content match in document: {document['url']} (relevance: {relevance}, tag: {tag_name})")
+                                    logger.info(f"Full content phrase match in document: {document['url']} (relevance: {relevance}, tag: {tag_name})")
+                                # Then look for individual word matches
+                                elif any(word in content for word in query_words if len(word) > 2):
+                                    # Simple relevance: sum of frequency of query words in content
+                                    relevance = sum(content.count(word) for word in query_words if len(word) > 2)
+                                    
+                                    # Get tag if available
+                                    tag = document.get('tag', MSG_TAG_CONTENT)
+                                    tag_name = TAG_NAMES.get(tag, "Unknown")
+                                    
+                                    results.append({
+                                        'url': document['url'],
+                                        'content': document.get('content', ''),
+                                        'source': 'full_content_search_words',
+                                        'relevance': relevance,
+                                        'tag': tag,
+                                        'tag_name': tag_name
+                                    })
+                                    logger.info(f"Full content word match in document: {document['url']} (relevance: {relevance}, tag: {tag_name})")
                         except Exception as e:
                             logger.warning(f"Error in full content search for document {obj['Key']}: {str(e)}")
                             continue

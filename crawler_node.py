@@ -56,7 +56,7 @@ class Crawler:
         
         # Domain crawl limits - track URLs per domain
         self.domain_url_counts = {}
-        self.max_urls_per_domain = 10  # Maximum URLs to crawl per domain
+        self.max_urls_per_domain = 50  # Increased from 10 to 50 to ensure more complete domain coverage
         
     def should_crawl_url(self, url):
         """Check if we should crawl this URL based on domain limits"""
@@ -103,6 +103,7 @@ class Crawler:
             
             for link in all_links:
                 href = link['href']
+                # Make sure we handle relative URLs properly
                 absolute_url = urljoin(base_url, href)
                 parsed_url = urlparse(absolute_url)
                 
@@ -110,12 +111,23 @@ class Crawler:
                 if (parsed_url.netloc == base_domain and 
                     self.is_valid_url(absolute_url) and 
                     absolute_url not in self.visited_urls):
-                    urls.append(absolute_url)
+                    # Special handling for important paths we want to ensure are crawled
+                    # We prioritize key paths like webinars, blog, documentation, etc.
+                    priority_paths = ['/events/', '/webinars/', '/faq/', '/blog/', '/about/', '/documentation/']
+                    is_priority = any(path in parsed_url.path for path in priority_paths)
+                    
+                    if is_priority:
+                        # Insert priority URLs at the beginning to ensure they're crawled
+                        urls.insert(0, absolute_url)
+                        logger.info(f"[Crawler-{self.crawler_id}] Found priority URL: {absolute_url}")
+                    else:
+                        urls.append(absolute_url)
             
-            # Limit to 10 URLs per page as requested
+            # Ensure we're keeping enough URLs to reach important content
+            # but still respecting a reasonable limit
             original_count = len(urls)
-            urls = urls[:10]
-            logger.info(f"[Crawler-{self.crawler_id}] Extracted {original_count} internal URLs from {base_url}, keeping 10 max")
+            urls = urls[:20]  # Increased from 10 to 20
+            logger.info(f"[Crawler-{self.crawler_id}] Extracted {original_count} internal URLs from {base_url}, keeping {len(urls)} max")
             
             # Log the actual URLs being returned
             for idx, url in enumerate(urls):
