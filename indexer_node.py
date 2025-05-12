@@ -29,7 +29,7 @@ logger.info(f"Using S3 Bucket: {S3_BUCKET_NAME}")
 
 # Initialize AWS clients
 sqs_client = boto3.client('sqs', region_name=AWS_REGION)
-s3_client = boto3.client('s3', region_name=AWS_REGION)z
+s3_client = boto3.client('s3', region_name=AWS_REGION)
 
 # Message Tags
 MSG_TAG_INFO = 0       # Regular informational messages
