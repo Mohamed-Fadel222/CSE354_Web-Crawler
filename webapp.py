@@ -8,6 +8,8 @@ import tempfile
 import io
 import base64
 import time
+import requests
+import hashlib
 
 # Load environment variables
 load_dotenv()
@@ -58,8 +60,26 @@ CACHE_TTL = 60  # seconds
 @app.route('/')
 def index():
     """Home page with system status and controls"""
-    logger.info("Rendering index.html template")
-    return render_template('index.html')
+    # Check S3 bucket status
+    s3_status = "unknown"
+    s3_empty = True
+    try:
+        # Check if bucket exists
+        s3_client.head_bucket(Bucket=S3_BUCKET_NAME)
+        s3_status = "available"
+        
+        # Check if bucket has content
+        response = s3_client.list_objects_v2(
+            Bucket=S3_BUCKET_NAME,
+            MaxKeys=5
+        )
+        s3_empty = 'Contents' not in response or len(response['Contents']) == 0
+    except Exception as e:
+        logger.error(f"Error checking S3 bucket: {str(e)}")
+        s3_status = "unavailable"
+    
+    logger.info(f"Rendering index.html template (S3 status: {s3_status}, empty: {s3_empty})")
+    return render_template('index.html', s3_status=s3_status, s3_empty=s3_empty)
 
 @app.route('/add-url', methods=['POST'])
 def add_url():
@@ -264,6 +284,72 @@ def search():
     results = []
     
     try:
+        # Check if the searchable_index directory exists and create it if needed
+        try:
+            # Check if searchable_index/documents/ exists
+            response = s3_client.list_objects_v2(
+                Bucket=S3_BUCKET_NAME,
+                Prefix='searchable_index/documents/',
+                MaxKeys=1
+            )
+            
+            # If 'Contents' is not in response, the directory doesn't exist
+            if 'Contents' not in response:
+                logger.warning("searchable_index/documents/ directory not found, might need to add content first")
+                
+                # Create empty placeholder file to ensure directory exists
+                s3_client.put_object(
+                    Bucket=S3_BUCKET_NAME,
+                    Key='searchable_index/documents/.placeholder',
+                    Body=''
+                )
+                logger.info("Created searchable_index/documents/ directory")
+                
+                # Create an empty master index
+                master_index = {
+                    "last_updated": time.time(),
+                    "document_count": 0,
+                    "documents": {},
+                    "keywords": {}
+                }
+                
+                # Save it to S3
+                s3_client.put_object(
+                    Bucket=S3_BUCKET_NAME,
+                    Key='searchable_index/master_index.json',
+                    Body=json.dumps(master_index),
+                    ContentType='application/json'
+                )
+                logger.info("Created empty master_index.json")
+                
+                # Return a message indicating the search index is empty
+                return jsonify({
+                    "results": [],
+                    "message": "The search index is empty. Please add some URLs to crawl first.",
+                    "status": "empty_index"
+                })
+        except Exception as e:
+            logger.error(f"Error checking or creating searchable_index directory: {str(e)}")
+        
+        # First check if S3 bucket exists and has content
+        try:
+            # Check if there's any content in the bucket
+            response = s3_client.list_objects_v2(
+                Bucket=S3_BUCKET_NAME,
+                MaxKeys=5
+            )
+            
+            # If bucket is empty, return a clear message
+            if 'Contents' not in response or len(response['Contents']) == 0:
+                logger.warning(f"S3 bucket {S3_BUCKET_NAME} appears to be empty")
+                return jsonify({
+                    "results": [],
+                    "message": "No content available - the database appears to be empty.",
+                    "status": "no_content" 
+                })
+        except Exception as e:
+            logger.error(f"Error checking S3 bucket state: {str(e)}")
+            
         # First try to load the master index for fastest search
         try:
             logger.info("Loading master index for fast search")
@@ -1195,18 +1281,165 @@ def monitor():
 
 @app.route('/search-page')
 def search_page():
-    """Render the search page with results"""
+    """Render search page"""
     query = request.args.get('query', '')
-    max_results = int(request.args.get('max_results', '10'))
+    
+    # Check if we need to clear cache first
+    clear = request.args.get('clear_cache', '').lower() in ['true', '1', 'yes']
+    if clear:
+        global url_cache, last_cache_update
+        url_cache = []
+        last_cache_update = 0
+        logger.info("URL cache cleared from search page")
     
     results = []
-    if query:
-        # Call the search function internally to get results
-        search_response = search()
-        search_data = json.loads(search_response.get_data(as_text=True))
-        results = search_data.get('results', [])
+    message = None
     
-    return render_template('search.html', query=query, results=results)
+    # Only perform search if we have a query
+    if query:
+        # Make search request to the API
+        search_api_response = requests.get(f"http://localhost:{request.host.split(':')[1]}/search?query={query}")
+        search_data = search_api_response.json()
+        
+        if 'results' in search_data:
+            results = search_data['results']
+        if 'message' in search_data:
+            message = search_data['message']
+    
+    logger.info(f"Rendering search.html template with query: {query}, results: {len(results) if results else 0}")
+    return render_template('search.html', query=query, results=results, message=message)
+
+@app.route('/clear-cache')
+def clear_cache():
+    """Clear the URL cache and force a refresh from S3/SQS"""
+    global url_cache, last_cache_update
+    
+    # Reset the cache
+    url_cache = []
+    last_cache_update = 0
+    logger.info("URL cache has been manually cleared")
+    
+    # Force a refresh of the cache
+    fresh_urls = refresh_url_cache()
+    
+    return jsonify({
+        "status": "success", 
+        "message": "Cache cleared successfully",
+        "new_cache_size": len(fresh_urls)
+    })
+
+@app.route('/test/create-search-index')
+def create_search_index():
+    """Create example search content directly in the searchable_index structure
+    This is a quick way to populate the search index for testing without waiting for crawling"""
+    try:
+        # Ensure the directories exist
+        s3_client.put_object(
+            Bucket=S3_BUCKET_NAME,
+            Key='searchable_index/.placeholder',
+            Body=''
+        )
+        
+        s3_client.put_object(
+            Bucket=S3_BUCKET_NAME,
+            Key='searchable_index/documents/.placeholder',
+            Body=''
+        )
+        
+        # Create sample documents with diverse content
+        sample_docs = [
+            {
+                "url": "https://example.com/",
+                "content": "This is the Example Domain homepage. This domain is for use in illustrative examples in documents.",
+                "tag": MSG_TAG_CONTENT,
+                "tag_name": TAG_NAMES[MSG_TAG_CONTENT],
+                "keywords": ["example", "domain", "homepage", "illustrative"]
+            },
+            {
+                "url": "https://example.com/about",
+                "content": "About page for Example Domain. This website serves as a placeholder for various testing scenarios.",
+                "tag": MSG_TAG_CONTENT,
+                "tag_name": TAG_NAMES[MSG_TAG_CONTENT],
+                "keywords": ["about", "example", "domain", "placeholder", "testing"]
+            },
+            {
+                "url": "https://example.org/products",
+                "content": "Our products include web crawlers, search engines, and distributed systems components.",
+                "tag": MSG_TAG_CONTENT,
+                "tag_name": TAG_NAMES[MSG_TAG_CONTENT],
+                "keywords": ["products", "crawlers", "search", "engines", "distributed", "systems"]
+            },
+            {
+                "url": "https://example.net/blog/search-engines",
+                "content": "Modern search engines use distributed crawlers to index the web efficiently. This post explores crawler architecture.",
+                "tag": MSG_TAG_CONTENT,
+                "tag_name": TAG_NAMES[MSG_TAG_CONTENT],
+                "keywords": ["search", "engines", "distributed", "crawlers", "architecture"]
+            },
+            {
+                "url": "https://searchable-example.com/",
+                "content": "This is a searchable example website that demonstrates how the search functionality works in our distributed web crawler.",
+                "tag": MSG_TAG_CONTENT,
+                "tag_name": TAG_NAMES[MSG_TAG_CONTENT],
+                "keywords": ["searchable", "example", "search", "distributed", "crawler"]
+            }
+        ]
+        
+        # Create master index structure
+        master_index = {
+            "last_updated": time.time(),
+            "document_count": len(sample_docs),
+            "documents": {},
+            "keywords": {}
+        }
+        
+        # Add documents to S3 and update master index
+        for doc in sample_docs:
+            # Generate document ID
+            doc_id = hashlib.md5(doc["url"].encode()).hexdigest()
+            
+            # Add timestamp
+            doc["timestamp"] = time.time()
+            doc["id"] = doc_id
+            
+            # Upload document to S3
+            s3_client.put_object(
+                Bucket=S3_BUCKET_NAME,
+                Key=f'searchable_index/documents/{doc_id}.json',
+                Body=json.dumps(doc),
+                ContentType='application/json'
+            )
+            
+            # Add to master index
+            master_index["documents"][doc_id] = {
+                "url": doc["url"],
+                "timestamp": doc["timestamp"],
+                "tag": doc["tag"]
+            }
+            
+            # Add keyword mappings
+            for keyword in doc.get("keywords", []):
+                if keyword not in master_index["keywords"]:
+                    master_index["keywords"][keyword] = []
+                master_index["keywords"][keyword].append(doc_id)
+        
+        # Save master index
+        s3_client.put_object(
+            Bucket=S3_BUCKET_NAME,
+            Key='searchable_index/master_index.json',
+            Body=json.dumps(master_index),
+            ContentType='application/json'
+        )
+        
+        return jsonify({
+            "status": "success",
+            "message": f"Created search index with {len(sample_docs)} sample documents",
+            "documents": [doc["url"] for doc in sample_docs],
+            "keywords": list(master_index["keywords"].keys())
+        })
+    except Exception as e:
+        logger.error(f"Error creating search index: {str(e)}")
+        return jsonify({"status": "error", "error": str(e)}), 500
 
 if __name__ == '__main__':
     # Create templates directory if it doesn't exist

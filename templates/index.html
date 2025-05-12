@@ -183,6 +183,25 @@
             </div>
         </div>
         
+        {% if s3_empty %}
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="alert alert-warning">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div>
+                            <i class="fas fa-exclamation-triangle me-2"></i>
+                            <strong>Database appears to be empty!</strong> 
+                            Search results may not be available until content is crawled.
+                        </div>
+                        <a href="/clear-cache" class="btn btn-sm btn-outline-secondary">
+                            <i class="fas fa-sync-alt me-1"></i>Refresh State
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+        
         <div class="row mb-4">
             <div class="col-md-6">
                 <div class="card">

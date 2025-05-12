@@ -48,6 +48,9 @@ class Indexer:
         self.index_dir = os.path.join(self.temp_dir, "index")
         os.makedirs(self.index_dir, exist_ok=True)
         
+        # Ensure required S3 directories exist
+        self._ensure_s3_directories()
+        
         # Try to download existing index from S3
         try:
             self._download_index_from_s3()
@@ -63,6 +66,47 @@ class Indexer:
         
         # Load master index file or create new one
         self.master_index = self._load_master_index()
+
+    def _ensure_s3_directories(self):
+        """Check if required directories exist in S3 and create them if not"""
+        try:
+            # Check if searchable_index/documents/ exists
+            response = s3_client.list_objects_v2(
+                Bucket=S3_BUCKET_NAME,
+                Prefix='searchable_index/documents/',
+                MaxKeys=1
+            )
+            
+            # If 'Contents' is not in response, the directory doesn't exist
+            if 'Contents' not in response:
+                logger.info("searchable_index/documents/ directory not found, creating it...")
+                # Create empty placeholder file to ensure directory exists
+                s3_client.put_object(
+                    Bucket=S3_BUCKET_NAME,
+                    Key='searchable_index/documents/.placeholder',
+                    Body=''
+                )
+                logger.info("Created searchable_index/documents/ directory")
+                
+            # Also ensure searchable_index/ exists (for master_index.json)
+            response = s3_client.list_objects_v2(
+                Bucket=S3_BUCKET_NAME,
+                Prefix='searchable_index/',
+                MaxKeys=1
+            )
+            
+            if 'Contents' not in response:
+                logger.info("searchable_index/ directory not found, creating it...")
+                s3_client.put_object(
+                    Bucket=S3_BUCKET_NAME,
+                    Key='searchable_index/.placeholder',
+                    Body=''
+                )
+                logger.info("Created searchable_index/ directory")
+                
+            logger.info("S3 directory structure verified")
+        except Exception as e:
+            logger.error(f"Error ensuring S3 directories exist: {str(e)}")
 
     def _upload_index_to_s3(self):
         """Upload the entire index directory to S3"""
@@ -103,12 +147,26 @@ class Indexer:
         except Exception as e:
             logger.info(f"Creating new master index: {str(e)}")
             # Create a new master index
-            return {
+            new_index = {
                 "last_updated": datetime.datetime.now().isoformat(),
                 "document_count": 0,
                 "documents": {},
                 "keywords": {}
             }
+            
+            # Save the new master index to S3
+            try:
+                s3_client.put_object(
+                    Bucket=S3_BUCKET_NAME,
+                    Key='searchable_index/master_index.json',
+                    Body=json.dumps(new_index),
+                    ContentType='application/json'
+                )
+                logger.info("Created and saved new master index to S3")
+            except Exception as e:
+                logger.error(f"Error saving new master index to S3: {str(e)}")
+                
+            return new_index
 
     def _save_master_index(self):
         """Save the master index file to S3"""

@@ -123,6 +123,11 @@
                                 <input type="text" class="form-control" id="query" name="query" value="{{ query }}" placeholder="Enter search terms" required>
                                 <button type="submit" class="btn btn-primary"><i class="fas fa-search me-1"></i>Search</button>
                             </div>
+                            <div class="d-flex justify-content-end">
+                                <a href="/search-page?clear_cache=true" class="btn btn-outline-secondary btn-sm">
+                                    <i class="fas fa-sync-alt me-1"></i>Refresh Database State
+                                </a>
+                            </div>
                         </form>
                     </div>
                 </div>
@@ -139,7 +144,11 @@
                         </div>
                     </div>
                     <div class="card-body">
-                        {% if results %}
+                        {% if message %}
+                            <div class="alert alert-info">
+                                <i class="fas fa-info-circle me-2"></i>{{ message }}
+                            </div>
+                        {% elif results %}
                             {% for result in results %}
                                 <div class="search-result">
                                     <div class="d-flex justify-content-between align-items-center">
